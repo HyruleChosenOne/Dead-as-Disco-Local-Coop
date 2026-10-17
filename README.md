@@ -3,6 +3,8 @@
 Bring a friend into the rhythm arena! This mod adds full local multiplayer co-op support to **Dead as Disco** via the Unreal Engine 5 scripting system.
 
 ---
+<img width="332" height="447" alt="image" src="https://github.com/user-attachments/assets/1f2b7bf1-ae7d-465f-80ab-d99d86b0766b" />
+
 
 ## 🎮 Quick Start & Controls
 
