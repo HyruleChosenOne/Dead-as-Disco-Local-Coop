@@ -1,5 +1,7 @@
 # Dead as Disco - Local Co-op Mod (v2.2)
 
+![Player 2 Studio & Customization Menu](screenshots/p2_studio_menu.png)
+
 Bring a friend into the rhythm arena! This UE4SS mod adds full 2-player local co-op support to **Dead as Disco** with gamepad drop-in shortcuts, an **interactive 5-tab Custom UI Studio Menu** inside Player 2's viewport, Dive Bar Wardrobe & Skill Station support for Player 2, singleton duplicate-spawn protection, automatic fullscreen cinematic switching, per-viewport UI scaling, and deadlock-free pause menu routing.
 
 ---
