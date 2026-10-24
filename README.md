@@ -13,9 +13,6 @@ Bring a friend into the rhythm arena! This UE4SS mod adds full 2-player local co
 ### Player 2 Custom Studio Menu (Docked Left Viewport)
 ![Player 2 Studio & Customization Menu](screenshots/p2_studio_menu.png)
 
-### Full Split-Screen Co-op in Action
-![Split-Screen Co-op](screenshots/p2_splitscreen.png)
-
 ---
 
 ## 🎮 Quick Start & Controls
