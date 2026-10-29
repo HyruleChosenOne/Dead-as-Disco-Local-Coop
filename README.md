@@ -121,6 +121,6 @@ All settings, gamepad bindings, tint palettes, UI scaling factors, and custom Pl
 
 - **[HyruleChosenOne](https://github.com/HyruleChosenOne)** — Mod Creator, lead logic design, and project maintainer.
 - **[UE4SS Team](https://github.com/UE4SS-RE/RE-UE4SS)** — Unreal Engine 4/5 Scripting System & C++ modding framework powering all runtime hooks, UMG reflection, and memory manipulation.
-- **Dangerous Bob Studios** — Creators and developers of **Dead as Disco** for crafting such an incredible rhythmic beat-'em-up experience.
+- **Brain Jar Games** — Creators and developers of **Dead as Disco** for crafting such an incredible rhythmic beat-'em-up experience.
 - **Antigravity AI (Google DeepMind)** — Pair programming, architectural refactoring, custom UMG layout design, and async streaming crash diagnostics.
 - **Community & Testers** — Thanks to everyone who tested early builds and provided feedback on split-screen viewport alignments and controller bindings!
