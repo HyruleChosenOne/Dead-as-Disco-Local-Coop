@@ -1,13 +1,5 @@
--- ============================================================================
--- DYNAMIC CATALOG SERVICE (COSMETICS, DANCES, BOSS SKILLS, IDOL UPGRADES)
--- ============================================================================
--- Indexes ALL game assets from:
---   1. PagodaPlayerCosmeticCatalogSubsystem.SortedCosmetics
---   2. PagodaPlayerUpgradeCatalogSubsystem.{BossAbilityUpgrades, SortedUpgrades}
---   3. Supplemental live UObject + Pagoda-Windows.utoc verified manifest
---      so every move/upgrade (Charlie, Dahlia, Arora, Prophet, Rebel, Shred)
---      is discoverable even before a progression tree node is unlocked in save!
--- ============================================================================
+-- Indexes cosmetics, dances, boss abilities, and idol upgrades from the native
+-- catalog subsystems plus cooked upgrade DataAssets not yet unlocked in P1's save.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -17,6 +9,7 @@ local CatalogService = {}
 local LastCosmeticCount = 0
 local LastUpgradeCount = 0
 local SupplementalUpgradesScanned = false
+local LastLoggedSummary = nil
 
 CatalogService.Lookup = {
     CosmeticsBySlot = nil, -- [1..5][normKey] -> Def
@@ -43,7 +36,8 @@ local KNOWN_IDOL_PRIORITY = {
     Charlie = 6,
 }
 
--- Core boss / marquee moves (normalized short names without PlayerUpgrade_<Idol>_)
+-- Core 4-slot directional boss / marquee moves (UpgradeType == 2 BossAbility)
+-- Note: FeverRush has UpgradeType == 1 (ActiveSkill), so it belongs in Charlie's active skills, not the 4 directional Boss slots.
 local KNOWN_BOSS_ABILITY_NAMES = {
     vermilliondance = true,
     chainlightning = true,
@@ -51,8 +45,11 @@ local KNOWN_BOSS_ABILITY_NAMES = {
     dropthebaxe = true,
     blockandretaliate = true,
     singularity = true,
-    feverrush = true,
 }
+
+CatalogService.NativeTagSet = {}
+CatalogService.NativePassiveDefs = {}
+CatalogService.NativeBossDefs = {}
 
 -- Complete verified manifest of cooked PlayerUpgrade_* assets from Pagoda-Windows.utoc
 -- (excluding *_EmptyTemplate placeholders) so uncollected Idol moves/upgrades are
@@ -182,7 +179,9 @@ end
 
 function CatalogService.OnWorldChanged()
     SupplementalUpgradesScanned = false
+    LastCosmeticCount = 0
     LastUpgradeCount = 0
+    LastLoggedSummary = nil
 end
 
 function CatalogService.IsReady()
@@ -191,6 +190,23 @@ end
 
 function CatalogService.GetAllUpgradeDefinitions()
     return CatalogService.Ordered.AllUpgrades or {}
+end
+
+local function AreCachedCosmeticsHealthy()
+    local dances = CatalogService.Ordered.Dances
+    if dances and #dances > 0 and not UObjectUtils.IsValid(dances[1].Def) then
+        return false
+    end
+    local bySlot = CatalogService.Ordered.CosmeticsBySlot
+    if bySlot then
+        for slot = 1, 5 do
+            local list = bySlot[slot]
+            if list and #list > 0 and not UObjectUtils.IsValid(list[1].Def) then
+                return false
+            end
+        end
+    end
+    return true
 end
 
 local function AreCachedUpgradesHealthy()
@@ -214,10 +230,17 @@ end
 
 function CatalogService.Refresh(force)
     local inGameplay = UObjectUtils.IsGameplayWorld()
-    if not force and CatalogService.Lookup.Upgrades and not AreCachedUpgradesHealthy() then
-        force = true
+    local forceCosmetics = (force == true)
+    local forceUpgrades = (force == true)
+
+    if not forceCosmetics and CatalogService.Lookup.CosmeticsBySlot and not AreCachedCosmeticsHealthy() then
+        forceCosmetics = true
+        Logger.Debug("CatalogService", "Detected GC'd cosmetic definitions; refreshing cosmetics.")
+    end
+    if not forceUpgrades and CatalogService.Lookup.Upgrades and not AreCachedUpgradesHealthy() then
+        forceUpgrades = true
         SupplementalUpgradesScanned = false
-        Logger.Debug("CatalogService", "Detected GC'd upgrade definitions -> refreshing full catalog.")
+        Logger.Debug("CatalogService", "Detected GC'd upgrade definitions; refreshing upgrades.")
     end
 
     -- 1. Cosmetics & Dances Catalog Subsystem
@@ -230,7 +253,7 @@ function CatalogService.Refresh(force)
             if arr then pcall(function() count = #arr end) end
             if count == 0 then return end
 
-            if force or not CatalogService.Lookup.CosmeticsBySlot or count ~= LastCosmeticCount then
+            if forceCosmetics or not CatalogService.Lookup.CosmeticsBySlot or count ~= LastCosmeticCount then
                 LastCosmeticCount = count
                 local cosMap = { [1] = {}, [2] = {}, [3] = {}, [4] = {}, [5] = {} }
                 local danceMap = {}
@@ -330,7 +353,7 @@ function CatalogService.Refresh(force)
             if arr then pcall(function() count = #arr end) end
             if count == 0 then return end
 
-            if force or not CatalogService.Lookup.Upgrades or count ~= LastUpgradeCount then
+            if forceUpgrades or not CatalogService.Lookup.Upgrades or count ~= LastUpgradeCount then
                 LastUpgradeCount = count
                 local upgMap = {}
                 local bossMap = {}
@@ -342,7 +365,23 @@ function CatalogService.Refresh(force)
                 local bossTagSet = {}
                 local seenTags = {}
                 local seenObjNames = {}
+                local nativeTagSet = {}
+                local nativePassiveDefs = {}
+                local nativeBossDefs = {}
                 local nativeCount, extraCount = 0, 0
+
+                local function registerInSubsystemMap(def, tagStr)
+                    if not (UObjectUtils.IsValid(def) and type(tagStr) == "string" and tagStr ~= "") then return end
+                    pcall(function() def.bAllowIfProgressionDisabled = true end)
+                    local ts = UObjectUtils.MakeTagStruct(def.UpgradeIdTag)
+                    if ts then
+                        pcall(function()
+                            if upgSub.TagIdToUpgrades and upgSub.TagIdToUpgrades.Add then
+                                upgSub.TagIdToUpgrades:Add(ts, def)
+                            end
+                        end)
+                    end
+                end
 
                 local function ensureIdol(idol)
                     if not ordByIdol[idol] then
@@ -364,7 +403,7 @@ function CatalogService.Refresh(force)
                     end
                 end
 
-                local function addBossDef(def)
+                local function addBossDef(def, isSupplemental)
                     if not UObjectUtils.IsValid(def) then return end
                     local objName = ""
                     pcall(function() objName = def:GetFName():ToString() end)
@@ -373,6 +412,11 @@ function CatalogService.Refresh(force)
                     local tagStr = UObjectUtils.GetTagString(def.UpgradeIdTag)
                     if tagStr == "" or bossTagSet[tagStr] then return end
                     bossTagSet[tagStr] = true
+                    registerInSubsystemMap(def, tagStr)
+                    if not isSupplemental then
+                        nativeTagSet[tagStr] = true
+                        nativeBossDefs[#nativeBossDefs + 1] = def
+                    end
 
                     local shortNoPrefix = objName:gsub("^PlayerUpgrade_[A-Za-z]+_", "")
                     local shortWithIdol = objName:gsub("^PlayerUpgrade_", "")
@@ -421,6 +465,10 @@ function CatalogService.Refresh(force)
 
                     local tagStr = UObjectUtils.GetTagString(def.UpgradeIdTag)
                     if tagStr == "" then return end
+                    registerInSubsystemMap(def, tagStr)
+                    if not isSupplemental then
+                        nativeTagSet[tagStr] = true
+                    end
 
                     local shortNoPrefix = objName:gsub("^PlayerUpgrade_[A-Za-z]+_", "")
                     local shortWithIdol = objName:gsub("^PlayerUpgrade_", "")
@@ -439,9 +487,9 @@ function CatalogService.Refresh(force)
                     -- Check if supplemental asset is an unlisted playable Boss Move
                     local normShort = UObjectUtils.NormalizeId(shortNoPrefix)
                     local isBossFlag = false
-                    pcall(function() isBossFlag = (def.bIsBossAbility == true) end)
+                    pcall(function() isBossFlag = (def.bIsBossAbility == true or def.UpgradeType == 2) end)
                     if KNOWN_BOSS_ABILITY_NAMES[normShort] or isBossFlag then
-                        addBossDef(def)
+                        addBossDef(def, isSupplemental)
                     end
 
                     local addrKey = UObjectUtils.GetKey(def)
@@ -453,6 +501,9 @@ function CatalogService.Refresh(force)
                             extraCount = extraCount + 1
                         else
                             nativeCount = nativeCount + 1
+                            if not isBoss then
+                                nativePassiveDefs[#nativePassiveDefs + 1] = def
+                            end
                         end
 
                         if not isBoss then
@@ -472,7 +523,7 @@ function CatalogService.Refresh(force)
 
                 local barr = upgSub.BossAbilityUpgrades
                 if barr then
-                    UObjectUtils.ForEachObj(barr, function(def) addBossDef(def) end)
+                    UObjectUtils.ForEachObj(barr, function(def) addBossDef(def, false) end)
                 end
 
                 UObjectUtils.ForEachObj(arr, function(def)
@@ -489,7 +540,7 @@ function CatalogService.Refresh(force)
                     end
                 end)
 
-                if not SupplementalUpgradesScanned or force then
+                if not SupplementalUpgradesScanned or forceUpgrades then
                     SupplementalUpgradesScanned = true
                     for _, pkgPath in ipairs(COOKED_UPGRADE_PATHS) do
                         local assetName = pkgPath:match("([^/]+)$")
@@ -515,10 +566,21 @@ function CatalogService.Refresh(force)
                 CatalogService.Ordered.UpgradesByIdol = ordByIdol
                 CatalogService.Ordered.AllUpgrades = allUniqueDefs
                 CatalogService.Ordered.IdolOrder = discoveredIdols
+                CatalogService.NativeTagSet = nativeTagSet
+                CatalogService.NativePassiveDefs = nativePassiveDefs
+                CatalogService.NativeBossDefs = nativeBossDefs
 
-                Logger.Info("CatalogService",
-                    "Indexed %d native + %d supplemental upgrades (%d boss skills, %d idol trees).",
-                    nativeCount, extraCount, #ordBoss, #discoveredIdols)
+                local summary = string.format("%d:%d:%d:%d", nativeCount, extraCount, #ordBoss, #discoveredIdols)
+                if summary ~= LastLoggedSummary then
+                    LastLoggedSummary = summary
+                    Logger.Info("CatalogService",
+                        "Indexed %d native + %d supplemental upgrades (%d boss skills, %d idol trees).",
+                        nativeCount, extraCount, #ordBoss, #discoveredIdols)
+                else
+                    Logger.Debug("CatalogService",
+                        "Refreshed %d native + %d supplemental upgrades (%d boss skills, %d idol trees).",
+                        nativeCount, extraCount, #ordBoss, #discoveredIdols)
+                end
             end
         end)
     elseif inGameplay then

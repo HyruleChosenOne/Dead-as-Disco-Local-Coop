@@ -1,6 +1,4 @@
--- ============================================================================
--- FLOATING ROUNDED CO-OP TOAST NOTIFICATIONS
--- ============================================================================
+-- Top-center toast notification banner for co-op status changes.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -15,6 +13,7 @@ local Config = {}
 local IsP2MenuOpenFn = nil
 local UI = {
     Widget = nil,
+    Card = nil,
     OwnerPC = nil,
     World = nil,
     AccentBar = nil,
@@ -46,6 +45,7 @@ function Notifications.Destroy()
         pcall(function() UI.Widget:RemoveFromParent() end)
     end
     UI.Widget = nil
+    UI.Card = nil
     UI.OwnerPC = nil
     UI.World = nil
     UI.AccentBar = nil
@@ -120,6 +120,7 @@ local function EnsureBuilt(ownerPC)
         pcall(function() uw:SetVisibility(2) end)
 
         UI.Widget = uw
+        UI.Card = card
         UI.OwnerPC = ownerPC
         UI.World = world
         UI.AccentBar = accentBar
@@ -139,11 +140,6 @@ function Notifications.Show(message, severity)
     local nCfg = Config.Notifications or {}
     if nCfg.Enabled == false then return end
 
-    if nCfg.OnlyShowJoinLeave == true then
-        local isJoinLeave = (msg:find("^Player 2 Joined") ~= nil) or (msg:find("^Player 2 Left") ~= nil)
-        if not isJoinLeave then return end
-    end
-
     local p1 = SessionManager.GetP1()
     if not p1 or SessionManager.State.IsInCutscene then return end
 
@@ -158,6 +154,7 @@ function Notifications.Show(message, severity)
     if not EnsureBuilt(p1) then return end
 
     local st = SEVERITY[severity] or SEVERITY.Info
+    UITheme.SetOutlineColor(UI.Card, st.Accent, 1.8)
     UITheme.SetFill(UI.AccentBar, st.Accent)
     UITheme.SetFill(UI.BadgePill, st.Soft)
     UITheme.SetTextColor(UI.BadgeText, st.Accent)
@@ -166,19 +163,19 @@ function Notifications.Show(message, severity)
 
     pcall(function() UI.Widget:SetVisibility(3) end) -- SelfHitTestInvisible
     UI.Visible = true
-    HideAtTime = os.clock() + (nCfg.Duration or 3.0)
+    HideAtTime = os.clock() + (nCfg.Duration or 2.6)
 end
 
 function Notifications.Hide()
     if UObjectUtils.IsValid(UI.Widget) and UI.Visible then
         pcall(function() UI.Widget:SetVisibility(2) end)
-        UI.Visible = false
     end
+    UI.Visible = false
 end
 
 function Notifications.Tick(now)
     if not UI.Visible then return end
-    if SessionManager.State.IsInCutscene or (now >= HideAtTime) then
+    if (not UObjectUtils.IsValid(UI.Widget)) or SessionManager.State.IsInCutscene or (now >= HideAtTime) then
         Notifications.Hide()
     end
 end

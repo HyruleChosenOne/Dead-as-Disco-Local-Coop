@@ -1,12 +1,4 @@
--- ============================================================================
--- PARTITIONED PER-PLAYER PROFILE & LOADOUT STORE (DETERMINISTIC p2_profile.json)
--- ============================================================================
--- Strictly maintains separate tables per PlayerIndex:
---   * Players[0] -> Read-only mirror of P1 (for diagnostics / verification)
---   * Players[1] -> Isolated editable Player 2 state + JSON persistence
--- Uses UObjectUtils.GetModRootDir() .. "p2_profile.json" (no CWD ambiguity),
--- with automatic one-time migration from legacy saved_p2_customization.json.
--- ============================================================================
+-- Per-player profile state and p2_profile.json persistence (with one-time legacy migration).
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -20,6 +12,7 @@ local Callbacks = {}
 
 local PROFILE_FILENAME = "p2_profile.json"
 local LEGACY_FILENAME = "saved_p2_customization.json"
+local PROFILE_SCHEMA_VERSION = 3
 
 local function GetProfilePath()
     return UObjectUtils.GetModRootDir() .. PROFILE_FILENAME
@@ -66,18 +59,59 @@ local Players = {
     [1] = CreateEmptyStore(),
 }
 
+local function UpgradeProfileSchemaIfNeeded(data, targetPath)
+    if type(data) ~= "table" then return data end
+    local dirty = false
+    if tonumber(data.ProfileSchemaVersion) ~= PROFILE_SCHEMA_VERSION then
+        data.ProfileSchemaVersion = PROFILE_SCHEMA_VERSION
+        data.ScreenMode = 0
+        data.LastSplitScreenMode = 0
+        data.DynamicSharedCameraEnabled = true
+        dirty = true
+    end
+    -- Sanitize legacy FeverRush entries out of BossAbilitySlots (FeverRush is UpgradeType==1 ActiveSkill).
+    if type(data.BossAbilitySlots) == "table" then
+        local fallbackBosses = {
+            ["0"] = "PlayerUpgrade_Dancer_VermillionDance",
+            ["1"] = "PlayerUpgrade_Doll_Singularity",
+            ["2"] = "PlayerUpgrade_Shred_ChainLightning",
+            ["3"] = "PlayerUpgrade_Prophet_BlockAndRetaliate",
+        }
+        for k, v in pairs(data.BossAbilitySlots) do
+            if type(v) == "string" and string.find(string.lower(v), "feverrush", 1, true) then
+                data.BossAbilitySlots[k] = fallbackBosses[tostring(k)] or "PlayerUpgrade_Prophet_BlockAndRetaliate"
+                dirty = true
+            end
+        end
+    end
+    -- Normalize CustomFOV to one of the discrete Wide (100) / Wider (112) presets
+    if type(data.CustomFOV) == "number" then
+        if data.CustomFOV >= 106.0 and data.CustomFOV ~= 112.0 then
+            data.CustomFOV = 112.0
+            dirty = true
+        elseif data.CustomFOV < 106.0 and data.CustomFOV ~= 100.0 then
+            data.CustomFOV = 100.0
+            dirty = true
+        end
+    end
+    if dirty and type(targetPath) == "string" and targetPath ~= "" then
+        Json.WriteFile(targetPath, data)
+    end
+    return data
+end
+
 local function ReadRawProfileWithMigration()
     local mainPath = GetProfilePath()
     local data, readPath = Json.ReadFile(mainPath)
     if type(data) == "table" then
-        return data, readPath, false
+        return UpgradeProfileSchemaIfNeeded(data, mainPath), readPath, false
     end
 
     local legacyPath = GetLegacyPath()
     local legacyData = Json.ReadFile(legacyPath)
     if type(legacyData) == "table" then
         Logger.Info("ProfileStore", "Migrating legacy profile '%s' -> '%s'", legacyPath, mainPath)
-        Json.WriteFile(mainPath, legacyData)
+        UpgradeProfileSchemaIfNeeded(legacyData, mainPath)
         return legacyData, mainPath, true
     end
     return nil, nil, false
@@ -112,12 +146,6 @@ function ProfileStore.Init(config, callbacks)
     end
 end
 
-function ProfileStore.GetStore(playerIndex)
-    if playerIndex == 0 then return Players[0] end
-    if playerIndex == 1 then return Players[1] end
-    return nil
-end
-
 function ProfileStore.GetP2()
     return Players[1]
 end
@@ -129,22 +157,34 @@ end
 function ProfileStore.SetP2Cosmetic(slot, def)
     local p2 = Players[1]
     p2.CosmeticSlots[slot] = def
-    local fname = GetObjFName(def)
-    if fname then p2.CosmeticSlotNames[slot] = fname end
+    if def == nil then
+        p2.CosmeticSlotNames[slot] = nil
+    else
+        local fname = GetObjFName(def)
+        if fname then p2.CosmeticSlotNames[slot] = fname end
+    end
 end
 
 function ProfileStore.SetP2Dance(slotIdx, def)
     local p2 = Players[1]
     p2.DanceSlots[slotIdx] = def
-    local fname = GetObjFName(def)
-    if fname then p2.DanceSlotNames[slotIdx] = fname end
+    if def == nil then
+        p2.DanceSlotNames[slotIdx] = nil
+    else
+        local fname = GetObjFName(def)
+        if fname then p2.DanceSlotNames[slotIdx] = fname end
+    end
 end
 
 function ProfileStore.SetP2BossAbility(slotIdx, def)
     local p2 = Players[1]
     p2.BossAbilitySlots[slotIdx] = def
-    local fname = GetObjFName(def)
-    if fname then p2.BossAbilitySlotNames[slotIdx] = fname end
+    if def == nil then
+        p2.BossAbilitySlotNames[slotIdx] = nil
+    else
+        local fname = GetObjFName(def)
+        if fname then p2.BossAbilitySlotNames[slotIdx] = fname end
+    end
 end
 
 function ProfileStore.SetP2Upgrade(tagStr, def, enabled)
@@ -179,7 +219,7 @@ function ProfileStore.SyncCanonicalNamesFromLive()
 end
 
 function ProfileStore.RehydrateFromCatalog()
-    CatalogService.Refresh(true)
+    CatalogService.Refresh(not CatalogService.IsReady())
     if not CatalogService.IsReady() then return 0 end
 
     local p2 = Players[1]
@@ -379,6 +419,7 @@ function ProfileStore.SaveP2Profile(extraFields)
     if not p2.Initialized then
         local existing = ReadRawProfileWithMigration()
         if type(existing) ~= "table" then existing = {} end
+        existing.ProfileSchemaVersion = PROFILE_SCHEMA_VERSION
         if extraFields then
             for _, fieldName in ipairs({
                 "TintMode", "TintPaletteIndex", "ScreenMode", "LastSplitScreenMode",
@@ -439,6 +480,7 @@ function ProfileStore.SaveP2Profile(extraFields)
     local expCfg = Config.Experimental or {}
 
     local payload = {
+        ProfileSchemaVersion = PROFILE_SCHEMA_VERSION,
         OutfitPresetIndex = p2.OutfitPresetIndex or 2,
         LoadoutPresetIndex = p2.LoadoutPresetIndex or 2,
         CustomPieceOverride = (p2.CustomPieceOverride == true),
@@ -469,7 +511,7 @@ function ProfileStore.SaveP2Profile(extraFields)
 end
 
 function ProfileStore.LoadP2Profile()
-    CatalogService.Refresh(true)
+    CatalogService.Refresh(not CatalogService.IsReady())
     local data = ReadRawProfileWithMigration()
     if type(data) ~= "table" then return nil end
 
@@ -513,10 +555,11 @@ function ProfileStore.LoadP2Profile()
             local name = data.BossAbilitySlots[tostring(sIdx)]
             if type(name) == "string" and name ~= "" then
                 p2.BossAbilitySlotNames[sIdx] = name
-                anyBoss = true
                 local bDef = CatalogService.FindBossAbility(name)
                 if UObjectUtils.IsValid(bDef) then
+                    p2.BossAbilitySlotNames[sIdx] = GetObjFName(bDef) or name
                     ProfileStore.SetP2BossAbility(sIdx, bDef)
+                    anyBoss = true
                 end
             end
         end

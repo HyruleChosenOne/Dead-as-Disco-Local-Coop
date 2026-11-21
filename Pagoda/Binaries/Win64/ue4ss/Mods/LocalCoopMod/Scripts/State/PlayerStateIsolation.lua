@@ -1,27 +1,12 @@
--- ============================================================================
--- STRICT P1 / P2 STATE & SKILL ISOLATION ENGINE (ZERO-BLEED ARCHITECTURE)
--- ============================================================================
--- Solves the root C++ cause of Dead as Disco skill/ability bleed:
---   UPagodaPlayerUpgradeComponent::GetPlaythroughData() internally resolves
---   UEngine::GetFirstLocalPlayerController()->GetPlaythroughPlayerData()
---   ([P1_PlayerState + 0x3D0]), and UPagodaPlayerUpgradeCatalogSubsystem
---   reads LocalPlayers[0] + 0x2C8.
+-- P1/P2 PlaythroughData and upgrade isolation.
 --
--- Isolation Architecture:
---   1. Owns GameInstance-rooted DedicatedP2PPD + empty DedicatedP2AltPPD,
---      pre-bound onto P2's APagodaPlayerState (+0x3D0) and UPagodaLocalPlayer
---      (+0x2C8) synchronously on object construction.
---   2. Wraps P2 CreatePlayer/Spawn AND every P2 UPagodaPlayerUpgradeComponent
---      operation in synchronous single-threaded WithScopedP2PPD(p1Ctrl, ...):
---        - Temporarily points [P1_PS + 0x3D0] (+ LP +0x2C8) -> DedicatedP2PPD.
---        - Executes the synchronous P2 call (BeginPlay / SetupInitialUpgrades /
---          EquipOrSwapBossAbilityAtSlot / HandleUpgradeEquippedStateChanged).
---        - Unconditionally restores [P1_PS + 0x3D0] = P1_PPD on the exact same
---          frame and verifies read-back!
---   3. Read-only P1 anti-bleed audit (NEVER writes back to P1 in a feedback loop)
---      plus P2-only stray-delegate reconciliation if an engine level load ever
---      subscribed p2Upg before Lua isolation.
--- ============================================================================
+-- UPagodaPlayerUpgradeComponent::GetPlaythroughData() resolves LocalPlayer[0]'s
+-- PlayerState->PlaythroughData (+0x3D0), and UPagodaPlayerUpgradeCatalogSubsystem
+-- reads LocalPlayer[0]->PlaythroughData (+0x2C8). To keep P2's skills and cosmetics
+-- independent without mutating P1's save data, P2 gets a GameInstance-rooted
+-- DedicatedP2PPD, and every synchronous P2 upgrade/cosmetic call runs inside
+-- WithScopedP2PPD, which temporarily points P1's pointers to DedicatedP2PPD and
+-- restores them on the same frame.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -62,6 +47,14 @@ PlayerStateIsolation.Status = {
 function PlayerStateIsolation.Init(config)
     Config = config or {}
     UObjectUtils.EnsurePlaythroughDataBridges()
+    UObjectUtils.EnsureUpgradeDefinitionBridges()
+end
+
+function PlayerStateIsolation.OnWorldChanged()
+    AppliedP2UpgradeTags = {}
+    if ScopedRedirectDepth == 0 then
+        ActiveRedirectState = nil
+    end
 end
 
 function PlayerStateIsolation.IsInScopedP2Write()
@@ -140,7 +133,7 @@ function PlayerStateIsolation.GetVerifiedP2UpgradeComponent(p1Ctrl, p2Ctrl)
     local p2Pawn = p2Ctrl.Pawn
     local p1Pawn = UObjectUtils.IsLive(p1Ctrl) and p1Ctrl.Pawn or nil
     if UObjectUtils.IsLive(p1Pawn) and UObjectUtils.Same(p1Pawn, p2Pawn) then
-        Logger.Error("Isolation", "P2 Pawn aliased P1 Pawn — blocking upgrade component access!")
+        Logger.Error("Isolation", "P2 Pawn aliased P1 Pawn; blocking upgrade component access.")
         return nil, nil
     end
 
@@ -148,7 +141,7 @@ function PlayerStateIsolation.GetVerifiedP2UpgradeComponent(p1Ctrl, p2Ctrl)
     local p1Upg = UObjectUtils.IsLive(p1Ctrl) and PlayerStateIsolation.GetUpgradeComponent(p1Ctrl) or nil
     if not UObjectUtils.IsValid(p2Upg) then return nil, p1Upg end
     if UObjectUtils.IsValid(p1Upg) and UObjectUtils.Same(p1Upg, p2Upg) then
-        Logger.Error("Isolation", "P2 UpgradeComponent aliased P1 UpgradeComponent — blocked!")
+        Logger.Error("Isolation", "P2 UpgradeComponent aliased P1 UpgradeComponent; blocked.")
         return nil, p1Upg
     end
     return p2Upg, p1Upg
@@ -324,11 +317,9 @@ function PlayerStateIsolation.IsolatePlayerStateObject(ps)
     return false
 end
 
--- Executes `fn(DedicatedP2PPD)` synchronously on the Game Thread while
--- temporarily pointing [P1_PlayerState + 0x3D0] (and [P1_LocalPlayer + 0x2C8])
--- to DedicatedP2PPD so UPagodaPlayerUpgradeComponent::GetPlaythroughData()
--- resolves P2's isolated data instead of mutating or reading P1's PPD.
--- Guarantees immediate same-frame restoration via pcall cleanup!
+-- Runs fn(DedicatedP2PPD) while temporarily pointing P1's PlaythroughData slots
+-- to DedicatedP2PPD so UPagodaPlayerUpgradeComponent::GetPlaythroughData() resolves P2.
+-- Restores P1's pointers synchronously before returning.
 function PlayerStateIsolation.WithScopedP2PPD(p1Ctrl, opName, fn)
     if type(fn) ~= "function" then return false end
 
@@ -354,7 +345,7 @@ function PlayerStateIsolation.WithScopedP2PPD(p1Ctrl, opName, fn)
         return false
     end
 
-    -- Ensure DedicatedP2PPD exists first BEFORE we touch P1's PPD!
+    -- Create DedicatedP2PPD before mutating P1's PlaythroughData pointer.
     PlayerStateIsolation.EnsureDedicatedP2PPD(p1Ctrl, SessionManager.GetP2())
     if not UObjectUtils.IsValid(DedicatedP2PPD) then
         Logger.Error("Isolation", "WithScopedP2PPD(%s) aborted: DedicatedP2PPD unavailable.", tostring(opName))
@@ -424,7 +415,7 @@ function PlayerStateIsolation.WithScopedP2PPD(p1Ctrl, opName, fn)
 end
 
 function PlayerStateIsolation.WrapP2Spawn(p1Ctrl, spawnFn)
-    -- Ensure P2's default/saved loadout is populated BEFORE DedicatedP2PPD + BeginPlay!
+    -- Populate P2's loadout before DedicatedP2PPD is read during BeginPlay.
     ProfileStore.EnsureP2Initialized(function() return PlayerStateIsolation.CaptureP1Snapshot(p1Ctrl) end)
     PlayerStateIsolation.EnsureDedicatedP2PPD(p1Ctrl, SessionManager.GetP2())
     return PlayerStateIsolation.WithScopedP2PPD(p1Ctrl, "SpawnP2", spawnFn)
@@ -497,7 +488,7 @@ local function SnapshotP1UpgradeState(p1Ctrl, candidateDefs)
     return { Upg = p1Upg, Boss = preBoss, Tags = preTags }
 end
 
--- Strictly READ-ONLY check after P2 write (never writes to P1!)
+-- Read-only post-write verification; never writes back to P1.
 local function VerifyP1ZeroBleed(preSnap, opName)
     if not (preSnap and UObjectUtils.IsValid(preSnap.Upg)) then return true end
     local p1Upg = preSnap.Upg
@@ -601,8 +592,7 @@ function PlayerStateIsolation.UnequipCosmeticsForCSM(p1Ctrl, p2Ctrl, p2Pawn, csm
         end
 
         WithTemporaryCosmeticAccess(defs, function()
-            -- Strip ALL 5 modular equipment/accessory slots (Body, Jacket, Glasses, Drumsticks, Hair)
-            -- so CSMs and Boss/Enemy models never wear any of Charlie's equipment or accessories!
+            -- Strip all 5 modular slots so custom/boss models do not wear Charlie's gear.
             if UObjectUtils.IsValid(DedicatedP2AltPPD) then
                 for slot = 1, 5 do
                     pcall(function() DedicatedP2AltPPD:UnequipCosmetic(slot) end)
@@ -717,9 +707,98 @@ local function GrantOwnedOnP2PPD(p2PPD, tagStruct)
     end
 end
 
--- Must ONLY be called inside WithScopedP2PPD!
-local function SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagStruct, shouldBeEquipped)
+local function ApplyUpgradeViaDonorBridge(p2Upg, p2PPD, targetDef, isBossSlotIdx)
+    if not (UObjectUtils.IsValid(p2Upg) and UObjectUtils.IsValid(p2PPD) and UObjectUtils.IsValid(targetDef)) then
+        return false
+    end
+    if not UObjectUtils.EnsureUpgradeDefinitionBridges() then return false end
+
+    local donorPool = (isBossSlotIdx ~= nil) and (CatalogService.NativeBossDefs or {}) or (CatalogService.NativePassiveDefs or {})
+    local donorDef = nil
+    local p2 = ProfileStore.GetP2()
+    for _, cand in ipairs(donorPool) do
+        if UObjectUtils.IsValid(cand) and not UObjectUtils.Same(cand, targetDef) then
+            local inUse = false
+            if isBossSlotIdx ~= nil then
+                for s = 0, 3 do
+                    if UObjectUtils.IsValid(p2.BossAbilitySlots[s]) and UObjectUtils.Same(p2.BossAbilitySlots[s], cand) then
+                        inUse = true
+                        break
+                    end
+                    local liveSlot = nil
+                    pcall(function() liveSlot = p2Upg:GetPlayerUpgradeAtSlot(s) end)
+                    if UObjectUtils.IsValid(liveSlot) and UObjectUtils.Same(liveSlot, cand) then
+                        inUse = true
+                        break
+                    end
+                end
+            end
+            if not inUse then
+                donorDef = cand
+                break
+            end
+        end
+    end
+    if not UObjectUtils.IsValid(donorDef) and #donorPool > 0 then
+        donorDef = donorPool[#donorPool]
+    end
+    if not UObjectUtils.IsValid(donorDef) then return false end
+
+    local donorOrigTag = UObjectUtils.MakeTagStruct(donorDef.UpgradeIdTag)
+    local targetTag = UObjectUtils.MakeTagStruct(targetDef.UpgradeIdTag)
+    if not (donorOrigTag and targetTag) then return false end
+
+    local donorWasEquipped = false
+    pcall(function() donorWasEquipped = (p2Upg:IsUpgradeEquipped(donorOrigTag) == true) end)
+
+    local savedWords = {}
+    local okCopy = pcall(function()
+        for idx = 0, 12 do
+            local prop = "Mod_UpgWord_" .. tostring(idx)
+            savedWords[idx] = donorDef[prop]
+        end
+        for idx = 0, 12 do
+            local prop = "Mod_UpgWord_" .. tostring(idx)
+            donorDef[prop] = targetDef[prop]
+        end
+    end)
+
+    if okCopy then
+        GrantOwnedOnP2PPD(p2PPD, targetTag)
+        GrantOwnedOnP2PPD(p2PPD, donorOrigTag)
+        if isBossSlotIdx ~= nil then
+            pcall(function() p2Upg:EquipOrSwapBossAbilityAtSlot(donorDef, isBossSlotIdx) end)
+        end
+        pcall(function() p2Upg:HandleUpgradeEquippedStateChanged(donorOrigTag, true) end)
+    end
+
+    pcall(function()
+        for idx = 0, 12 do
+            local prop = "Mod_UpgWord_" .. tostring(idx)
+            if savedWords[idx] ~= nil then
+                donorDef[prop] = savedWords[idx]
+            end
+        end
+    end)
+
+    if donorWasEquipped and isBossSlotIdx == nil then
+        local nowDonorEq = false
+        pcall(function() nowDonorEq = (p2Upg:IsUpgradeEquipped(donorOrigTag) == true) end)
+        if not nowDonorEq then
+            pcall(function() p2Upg:HandleUpgradeEquippedStateChanged(donorOrigTag, true) end)
+        end
+    end
+
+    local okVerify, verified = pcall(function() return p2Upg:IsUpgradeEquipped(targetTag) end)
+    return okVerify and verified == true
+end
+
+-- Caller must hold WithScopedP2PPD.
+local function SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagStruct, shouldBeEquipped, def)
     if not (UObjectUtils.IsValid(p2Upg) and UObjectUtils.IsValid(p2PPD) and tagStruct) then return end
+    if UObjectUtils.IsValid(def) then
+        pcall(function() def.bAllowIfProgressionDisabled = true end)
+    end
     if shouldBeEquipped then
         GrantOwnedOnP2PPD(p2PPD, tagStruct)
     end
@@ -727,22 +806,60 @@ local function SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagStruct, shouldBeEquip
     if (not okCur) or ((curEq == true) ~= (shouldBeEquipped == true)) then
         pcall(function() p2Upg:HandleUpgradeEquippedStateChanged(tagStruct, shouldBeEquipped == true) end)
     end
+    if shouldBeEquipped and UObjectUtils.IsValid(def) then
+        local okAfter, afterEq = pcall(function() return p2Upg:IsUpgradeEquipped(tagStruct) end)
+        if not (okAfter and afterEq == true) then
+            ApplyUpgradeViaDonorBridge(p2Upg, p2PPD, def, nil)
+        end
+    end
 end
 
--- Must ONLY be called inside WithScopedP2PPD!
--- Slots on DedicatedP2PPD FIRST so FindBossAbilityInputSlot resolves the right slot
--- when HandleUpgradeEquippedStateChanged grants the GameplayAbility on P2's pawn!
+-- Caller must hold WithScopedP2PPD.
+-- Vacates slotIdx first because EquipOrSwapBossAbilityAtSlot refuses to overwrite
+-- an occupied slot when the incoming ability is not already slotted.
 local function EquipSingleBossOnP2(p2Upg, p2PPD, bossDef, slotIdx)
     if not (UObjectUtils.IsValid(p2Upg) and UObjectUtils.IsValid(p2PPD) and UObjectUtils.IsValid(bossDef)) then return end
+    pcall(function() bossDef.bAllowIfProgressionDisabled = true end)
     local tagStruct = UObjectUtils.MakeTagStruct(bossDef.UpgradeIdTag)
     if not tagStruct then return end
 
+    -- Vacate any existing ability occupying slotIdx.
+    local oldAtSlot = nil
+    pcall(function() oldAtSlot = p2Upg:GetPlayerUpgradeAtSlot(slotIdx) end)
+    if UObjectUtils.IsValid(oldAtSlot) and not UObjectUtils.Same(oldAtSlot, bossDef) then
+        local oldTag = UObjectUtils.MakeTagStruct(oldAtSlot.UpgradeIdTag)
+        if oldTag then
+            pcall(function() p2Upg:HandleUpgradeEquippedStateChanged(oldTag, false) end)
+        end
+    end
+
+    -- Unequip bossDef if already slotted elsewhere so ApplyUpgradeToPawn rebinds it to slotIdx.
+    local curAtTarget = nil
+    pcall(function() curAtTarget = p2Upg:GetPlayerUpgradeAtSlot(slotIdx) end)
+    local alreadyInTargetSlot = UObjectUtils.IsValid(curAtTarget) and UObjectUtils.Same(curAtTarget, bossDef)
+    if not alreadyInTargetSlot then
+        local okEq, isEq = pcall(function() return p2Upg:IsUpgradeEquipped(tagStruct) end)
+        if okEq and isEq == true then
+            pcall(function() p2Upg:HandleUpgradeEquippedStateChanged(tagStruct, false) end)
+        end
+    end
+
+    -- 3. Grant ownership and bind slot on DedicatedP2PPD + p2Upg
     GrantOwnedOnP2PPD(p2PPD, tagStruct)
     pcall(function() p2Upg:EquipOrSwapBossAbilityAtSlot(bossDef, slotIdx) end)
 
+    local postAtSlot = nil
+    pcall(function() postAtSlot = p2Upg:GetPlayerUpgradeAtSlot(slotIdx) end)
     local okCur, curEq = pcall(function() return p2Upg:IsUpgradeEquipped(tagStruct) end)
-    if not (okCur and curEq == true) then
+    if not (okCur and curEq == true and UObjectUtils.IsValid(postAtSlot)) then
         pcall(function() p2Upg:HandleUpgradeEquippedStateChanged(tagStruct, true) end)
+    end
+
+    -- 4. Fallback donor bridge for supplemental Boss Abilities (e.g. LightningStrike) if TagIdToUpgrades didn't resolve
+    local finalAtSlot = nil
+    pcall(function() finalAtSlot = p2Upg:GetPlayerUpgradeAtSlot(slotIdx) end)
+    if not UObjectUtils.IsValid(finalAtSlot) then
+        ApplyUpgradeViaDonorBridge(p2Upg, p2PPD, bossDef, slotIdx)
     end
 end
 
@@ -779,7 +896,7 @@ function PlayerStateIsolation.ToggleUpgradeOnP2(p1Ctrl, p2Ctrl, def)
         local nextState = (p2.ActiveUpgrades[tagStr] == nil)
 
         local p1Snap = SnapshotP1UpgradeState(p1Ctrl, { def })
-        SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagStruct, nextState)
+        SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagStruct, nextState, def)
         VerifyP1ZeroBleed(p1Snap, "ToggleUpgradeOnP2")
 
         AppliedP2UpgradeTags[upgKey][tagStr] = nextState and tagStruct or nil
@@ -908,7 +1025,20 @@ function PlayerStateIsolation.ApplyDancesAndSkillsToP2(p1Ctrl, p2Ctrl, p2Pawn)
             end
         end
 
-        -- Step A: Apply all passive / idol upgrades (skipping active boss ability tags
+        -- Step A0: Vacate any currently slotted boss abilities on p2Upg that do not match the exact target slot
+        for sIdx = 0, 3 do
+            local curSlotDef = nil
+            pcall(function() curSlotDef = p2Upg:GetPlayerUpgradeAtSlot(sIdx) end)
+            local wantSlotDef = p2.BossAbilitySlots[sIdx]
+            if UObjectUtils.IsValid(curSlotDef) and (not UObjectUtils.IsValid(wantSlotDef) or not UObjectUtils.Same(curSlotDef, wantSlotDef)) then
+                local oldTag = UObjectUtils.MakeTagStruct(curSlotDef.UpgradeIdTag)
+                if oldTag then
+                    pcall(function() p2Upg:HandleUpgradeEquippedStateChanged(oldTag, false) end)
+                end
+            end
+        end
+
+        -- Step A: Apply all passive / idol / active upgrades (skipping active boss ability tags
         -- when wanted so Step B binds exact slots 0..3 cleanly without clearing them)
         for _, def in ipairs(CatalogService.GetAllUpgradeDefinitions()) do
             if UObjectUtils.IsValid(def) then
@@ -917,7 +1047,7 @@ function PlayerStateIsolation.ApplyDancesAndSkillsToP2(p1Ctrl, p2Ctrl, p2Pawn)
                 if tagStruct and tagStr ~= "" then
                     local isWanted = (wantedTags[tagStr] ~= nil)
                     if not (bossTagSet[tagStr] and isWanted) then
-                        SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagStruct, isWanted)
+                        SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagStruct, isWanted, def)
                     end
                     if isWanted then appliedMap[tagStr] = tagStruct end
                 end
@@ -960,11 +1090,7 @@ end
 -- EVENT-DRIVEN STRAY-DELEGATE RECONCILER & INTEGRITY AUDIT
 -- ============================================================================
 
--- Called by HookRegistry on HandleUpgradeEquippedStateChanged.
--- If P2's UpgradeComponent receives an equip-state change while we are NOT in a
--- WithScopedP2PPD call (e.g. a stray P1_PPD delegate fired across an engine
--- level travel), reconcile ONLY that single tag on P2 cleanly inside
--- WithScopedP2PPD — NEVER touching P1_PPD or P1's UpgradeComponent!
+-- Reconciles stray P1_PPD delegate updates on P2's UpgradeComponent without touching P1.
 function PlayerStateIsolation.OnHandleUpgradeStateChanged(comp, tagStruct)
     if ScopedRedirectDepth > 0 then return end
     if not SessionManager.IsP2Active() or not SessionManager.IsSafeForGameplayHooks() then return end
@@ -989,19 +1115,21 @@ function PlayerStateIsolation.OnHandleUpgradeStateChanged(comp, tagStruct)
         if not (p1Ctrl and UObjectUtils.IsValid(p2Upg) and tagCopy) then return end
 
         local p2 = ProfileStore.GetP2()
-        local shouldHave = (p2.ActiveUpgrades[tagStr] ~= nil)
+        local targetDef = p2.ActiveUpgrades[tagStr]
+        local shouldHave = (targetDef ~= nil)
         if not shouldHave then
             for s = 0, 3 do
                 local bDef = p2.BossAbilitySlots[s]
                 if UObjectUtils.IsValid(bDef) and UObjectUtils.GetTagString(bDef.UpgradeIdTag) == tagStr then
                     shouldHave = true
+                    targetDef = bDef
                     break
                 end
             end
         end
 
         PlayerStateIsolation.WithScopedP2PPD(p1Ctrl, "ReconcileP2Tag", function(p2PPD)
-            SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagCopy, shouldHave)
+            SetUpgradeEquippedOnP2Comp(p2Upg, p2PPD, tagCopy, shouldHave, targetDef)
         end)
     end, true)
 end

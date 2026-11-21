@@ -1,10 +1,4 @@
--- ============================================================================
--- UOBJECT SAFETY, REFLECTION HELPERS, ASSET LOADING & UE 5.7 BRIDGES
--- ============================================================================
--- Strictly self-contained (requires ONLY UEHelpers & Utils.Logger).
--- Guarantees every UObject dereference validates IsValid / IsLive first and
--- logs clear warnings via Logger.Missing when expected objects/assets fail.
--- ============================================================================
+-- UObject liveness checks, reflection helpers, asset loading, and UE 5.7 property bridges.
 
 local UEHelpers = require("UEHelpers")
 local Logger = require("Utils.Logger")
@@ -20,13 +14,16 @@ local CachedAssetRegistryHelpers = nil
 local CachedWorld = nil
 local CachedWorldAt = -1.0
 local CachedIsGameplay = false
+local CachedIsGameplayAt = -1.0
+local CachedIsGameplayWorldKey = nil
 local CachedIsDiveBar = false
 local CachedDiveBarAt = -1.0
+local CachedDiveBarWorldKey = nil
 local CachedTagStructs = {}
 local DestroyedObjectKeys = {}
+local VerifiedNameKeys = {}
 local ActionCooldowns = {}
 local RegisteredCustomProps = {}
-local BridgeDetails = {}
 local ResolvedModRootDir = nil
 
 -- ============================================================================
@@ -93,19 +90,8 @@ function UObjectUtils.MarkDestroyed(obj)
     local k = UObjectUtils.GetKey(obj)
     if k then
         DestroyedObjectKeys[k] = os.clock()
+        VerifiedNameKeys[k] = nil
     end
-end
-
-function UObjectUtils.IsMarkedDestroyed(obj)
-    local k = UObjectUtils.GetKey(obj)
-    if not k then return true end
-    local ts = DestroyedObjectKeys[k]
-    if not ts then return false end
-    if (os.clock() - ts) > 30.0 then
-        DestroyedObjectKeys[k] = nil
-        return false
-    end
-    return true
 end
 
 function UObjectUtils.PruneDestroyedCache()
@@ -115,35 +101,22 @@ function UObjectUtils.PruneDestroyedCache()
             DestroyedObjectKeys[k] = nil
         end
     end
+    for k, ts in pairs(VerifiedNameKeys) do
+        if (now - ts) > 120.0 then
+            VerifiedNameKeys[k] = nil
+        end
+    end
 end
 
 function UObjectUtils.IsLive(obj)
     if not UObjectUtils.IsValid(obj) then return false end
-    if UObjectUtils.IsMarkedDestroyed(obj) then return false end
 
-    local okName, fullName = pcall(function() return obj:GetFullName() end)
-    if not okName or type(fullName) ~= "string" or fullName == "" then
-        return false
-    end
-    if fullName:find("Default__", 1, true)
-        or fullName:find("TRASHCLASS", 1, true)
-        or fullName:find("Transient.REINST", 1, true) then
-        return false
-    end
-
-    local okActFn, destroyingFn = pcall(function()
-        if type(obj.IsActorBeingDestroyed) == "function" then
-            return obj:IsActorBeingDestroyed()
-        end
-        return false
-    end)
-    if okActFn and destroyingFn == true then
-        return false
-    end
-
-    local okDestProp, destroyingProp = pcall(function() return obj.bActorIsBeingDestroyed end)
-    if okDestProp and destroyingProp == true then
-        return false
+    local key = UObjectUtils.GetKey(obj)
+    if not key then return false end
+    local dTs = DestroyedObjectKeys[key]
+    if dTs then
+        if (os.clock() - dTs) <= 30.0 then return false end
+        DestroyedObjectKeys[key] = nil
     end
 
     local okFlags, deadFlag = pcall(function()
@@ -159,9 +132,42 @@ function UObjectUtils.IsLive(obj)
         return false
     end)
     if okFlags and deadFlag == true then
+        VerifiedNameKeys[key] = nil
         return false
     end
 
+    local okDestProp, destroyingProp = pcall(function() return obj.bActorIsBeingDestroyed end)
+    if okDestProp and destroyingProp == true then
+        VerifiedNameKeys[key] = nil
+        return false
+    end
+
+    local okActFn, destroyingFn = pcall(function()
+        if type(obj.IsActorBeingDestroyed) == "function" then
+            return obj:IsActorBeingDestroyed()
+        end
+        return false
+    end)
+    if okActFn and destroyingFn == true then
+        VerifiedNameKeys[key] = nil
+        return false
+    end
+
+    if VerifiedNameKeys[key] ~= nil then
+        return true
+    end
+
+    local okName, fullName = pcall(function() return obj:GetFullName() end)
+    if not okName or type(fullName) ~= "string" or fullName == "" then
+        return false
+    end
+    if fullName:find("Default__", 1, true)
+        or fullName:find("TRASHCLASS", 1, true)
+        or fullName:find("Transient.REINST", 1, true) then
+        return false
+    end
+
+    VerifiedNameKeys[key] = os.clock()
     return true
 end
 
@@ -329,12 +335,26 @@ function UObjectUtils.GetWidgetBlueprintLibrary()
     return CachedWidgetBPLib
 end
 
+local function GetAssetRegistryHelpers()
+    if UObjectUtils.IsValid(CachedAssetRegistryHelpers) then return CachedAssetRegistryHelpers end
+    pcall(function()
+        CachedAssetRegistryHelpers = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
+    end)
+    return UObjectUtils.IsValid(CachedAssetRegistryHelpers) and CachedAssetRegistryHelpers or nil
+end
+
 function UObjectUtils.InvalidateWorldCache()
     CachedWorld = nil
     CachedWorldAt = -1.0
     CachedIsGameplay = false
+    CachedIsGameplayAt = -1.0
+    CachedIsGameplayWorldKey = nil
     CachedIsDiveBar = false
     CachedDiveBarAt = -1.0
+    CachedDiveBarWorldKey = nil
+    -- Clear destroyed/name caches on level change so recycled UObject addresses aren't falsely flagged.
+    DestroyedObjectKeys = {}
+    VerifiedNameKeys = {}
 end
 
 function UObjectUtils.GetWorld()
@@ -350,22 +370,30 @@ function UObjectUtils.GetWorld()
         return w
     end
     CachedWorld = nil
+    CachedWorldAt = -1.0
     return nil
 end
 
 function UObjectUtils.IsGameplayWorld()
     local now = os.clock()
-    if (now - CachedWorldAt) < 0.20 and UObjectUtils.IsValid(CachedWorld) then
-        return CachedIsGameplay, CachedWorld
-    end
     local world = UObjectUtils.GetWorld()
     if not UObjectUtils.IsValid(world) then
         CachedIsGameplay = false
+        CachedIsGameplayAt = -1.0
+        CachedIsGameplayWorldKey = nil
         return false, nil
     end
+
+    local wKey = UObjectUtils.GetKey(world)
+    if CachedIsGameplayWorldKey == wKey and (now - CachedIsGameplayAt) < 0.20 then
+        return CachedIsGameplay, world
+    end
+
     local ok, fullName = pcall(function() return world:GetFullName() end)
     if not ok or type(fullName) ~= "string" then
         CachedIsGameplay = false
+        CachedIsGameplayAt = now
+        CachedIsGameplayWorldKey = wKey
         return false, nil
     end
     if fullName:find("Level_MainMenu", 1, true)
@@ -373,19 +401,24 @@ function UObjectUtils.IsGameplayWorld()
         or fullName:find("Entry", 1, true)
         or fullName:find("Transition", 1, true) then
         CachedIsGameplay = false
+        CachedIsGameplayAt = now
+        CachedIsGameplayWorldKey = wKey
         return false, world
     end
     CachedIsGameplay = true
+    CachedIsGameplayAt = now
+    CachedIsGameplayWorldKey = wKey
     return true, world
 end
 
 function UObjectUtils.IsInDiveBar(primaryPC)
     local now = os.clock()
-    if (now - CachedDiveBarAt) < 0.25 and UObjectUtils.IsValid(CachedWorld) then
+    local w = UObjectUtils.GetWorld()
+    local wKey = UObjectUtils.IsValid(w) and UObjectUtils.GetKey(w) or nil
+    if wKey ~= nil and CachedDiveBarWorldKey == wKey and (now - CachedDiveBarAt) < 0.25 then
         return CachedIsDiveBar
     end
     local ok, res = pcall(function()
-        local w = UObjectUtils.GetWorld()
         if UObjectUtils.IsValid(w) then
             local fn = ""
             pcall(function() fn = w:GetFullName() end)
@@ -403,6 +436,7 @@ function UObjectUtils.IsInDiveBar(primaryPC)
     end)
     CachedIsDiveBar = (ok and res == true)
     CachedDiveBarAt = now
+    CachedDiveBarWorldKey = wKey
     return CachedIsDiveBar
 end
 
@@ -450,9 +484,7 @@ function UObjectUtils.GetDistanceSq(actorA, actorB)
     return (ok and type(d2) == "number") and d2 or math.huge
 end
 
--- ============================================================================
--- ASSET / CLASS LOADING (ZERO SILENT FAILURES)
--- ============================================================================
+-- Asset & class loading
 
 function UObjectUtils.LoadObject(objPath)
     if type(objPath) ~= "string" or objPath == "" then return nil end
@@ -466,16 +498,16 @@ function UObjectUtils.LoadObject(objPath)
     local pkgPath = pkgName and pkgName:match("^(.*)/[^/]+$") or "/Game"
 
     if pkgName and assetName then
-        pcall(function()
-            local arh = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
-            if UObjectUtils.IsValid(arh) then
+        local arh = GetAssetRegistryHelpers()
+        if arh then
+            pcall(function()
                 obj = arh:GetAsset({
                     PackageName = UEHelpers.FindOrAddFName(pkgName),
                     PackagePath = UEHelpers.FindOrAddFName(pkgPath),
                     AssetName = UEHelpers.FindOrAddFName(assetName),
                 })
-            end
-        end)
+            end)
+        end
         if UObjectUtils.IsValid(obj) then return obj end
     end
 
@@ -503,17 +535,17 @@ function UObjectUtils.LoadClass(packagePath, className, silentIfMissing)
     pcall(function() cls = StaticFindObject(fullPath) end)
     if UObjectUtils.IsValid(cls) then return cls end
 
-    pcall(function()
-        local arh = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
-        if UObjectUtils.IsValid(arh) then
+    local arh = GetAssetRegistryHelpers()
+    if arh then
+        pcall(function()
             local pkgPath = packagePath:match("^(.*)/[^/]+$") or "/Game"
             cls = arh:GetAsset({
                 PackageName = UEHelpers.FindOrAddFName(packagePath),
                 PackagePath = UEHelpers.FindOrAddFName(pkgPath),
                 AssetName = UEHelpers.FindOrAddFName(className),
             })
-        end
-    end)
+        end)
+    end
     if UObjectUtils.IsValid(cls) then return cls end
 
     if type(LoadAsset) == "function" then
@@ -531,14 +563,11 @@ function UObjectUtils.LoadClass(packagePath, className, silentIfMissing)
     return cls
 end
 
--- ============================================================================
--- UE 5.7 FObjectPtrProperty BRIDGES
--- ============================================================================
--- UE4SS 3.0.1 Beta does not expose FObjectPtrProperty size on UE 5.7.
--- Registers ObjectProperty bridges for APagodaPlayerState::PlaythroughData
--- (PlayerOnlyAttributeSet + 0x8 / 0x3D0) and UPagodaLocalPlayer::PlaythroughData
--- (PlayHistorySaveGame + 0x8 / 0x2C8). Never maps over TWeakObjectPtr!
--- ============================================================================
+-- UE 5.7 FObjectPtrProperty bridges:
+-- UE4SS 3.0.1 Beta does not expose FObjectPtrProperty size on UE 5.7, so we alias
+-- APagodaPlayerState::PlaythroughData (PlayerOnlyAttributeSet + 0x8 / 0x3D0) and
+-- UPagodaLocalPlayer::PlaythroughData (PlayHistorySaveGame + 0x8 / 0x2C8).
+-- Never point these offsets over a TWeakObjectPtr field.
 
 function UObjectUtils.EnsurePlaythroughDataBridges()
     if type(RegisterCustomProperty) ~= "function" or type(PropertyTypes) ~= "table" then
@@ -560,7 +589,6 @@ function UObjectUtils.EnsurePlaythroughDataBridges()
         end)
         if okRel then
             RegisteredCustomProps["Mod_PlaythroughData"] = true
-            BridgeDetails["Mod_PlaythroughData"] = "PlayerOnlyAttributeSet+0x8"
             Logger.Debug("UObjectUtils", "Registered Mod_PlaythroughData bridge (PlayerOnlyAttributeSet+0x8)")
         else
             local okAbs = pcall(function()
@@ -573,11 +601,9 @@ function UObjectUtils.EnsurePlaythroughDataBridges()
             end)
             if okAbs then
                 RegisteredCustomProps["Mod_PlaythroughData"] = true
-                BridgeDetails["Mod_PlaythroughData"] = "0x3D0"
                 Logger.Debug("UObjectUtils", "Registered Mod_PlaythroughData bridge (0x3D0)")
             else
-                BridgeDetails["Mod_PlaythroughData"] = "Failed"
-                Logger.Error("UObjectUtils", "Failed to register Mod_PlaythroughData bridge!")
+                Logger.Error("UObjectUtils", "Failed to register Mod_PlaythroughData bridge.")
             end
         end
     end
@@ -596,7 +622,6 @@ function UObjectUtils.EnsurePlaythroughDataBridges()
         end)
         if okLpRel then
             RegisteredCustomProps["Mod_LP_PlaythroughData"] = true
-            BridgeDetails["Mod_LP_PlaythroughData"] = "PlayHistorySaveGame+0x8"
             Logger.Debug("UObjectUtils", "Registered Mod_LP_PlaythroughData bridge (PlayHistorySaveGame+0x8)")
         else
             local okLpAbs = pcall(function()
@@ -609,11 +634,9 @@ function UObjectUtils.EnsurePlaythroughDataBridges()
             end)
             if okLpAbs then
                 RegisteredCustomProps["Mod_LP_PlaythroughData"] = true
-                BridgeDetails["Mod_LP_PlaythroughData"] = "0x2C8"
                 Logger.Debug("UObjectUtils", "Registered Mod_LP_PlaythroughData bridge (0x2C8)")
             else
-                BridgeDetails["Mod_LP_PlaythroughData"] = "Failed"
-                Logger.Error("UObjectUtils", "Failed to register Mod_LP_PlaythroughData bridge!")
+                Logger.Error("UObjectUtils", "Failed to register Mod_LP_PlaythroughData bridge.")
             end
         end
     end
@@ -621,12 +644,47 @@ function UObjectUtils.EnsurePlaythroughDataBridges()
     return RegisteredCustomProps["Mod_PlaythroughData"] == true
 end
 
-function UObjectUtils.GetBridgeStatus()
-    return {
-        PlayerState = RegisteredCustomProps["Mod_PlaythroughData"] == true,
-        LocalPlayer = RegisteredCustomProps["Mod_LP_PlaythroughData"] == true,
-        Details = BridgeDetails,
-    }
+local UPGRADE_DEF_WORD_OFFSETS = {
+    [0]  = 0x3C,  -- UpgradeIdTag (8 bytes)
+    [1]  = 0x44,  -- PlayerUpgradeProgressionTag (8 bytes)
+    [2]  = 0x4C,  -- UpgradeType + flags (8 bytes)
+    [3]  = 0x160, -- UpgradeGrants.GrantedGameplayEffects Data
+    [4]  = 0x168, -- UpgradeGrants.GrantedGameplayEffects Num/Max
+    [5]  = 0x170, -- UpgradeGrants.GAComponentPackages Data
+    [6]  = 0x178, -- UpgradeGrants.GAComponentPackages Num/Max
+    [7]  = 0x180, -- UpgradeGrants.InputActionHandlerClasses Data
+    [8]  = 0x188, -- UpgradeGrants.InputActionHandlerClasses Num/Max
+    [9]  = 0x190, -- AdditionalKeywordTags word 0
+    [10] = 0x198, -- AdditionalKeywordTags word 1
+    [11] = 0x1A0, -- AdditionalKeywordTags word 2
+    [12] = 0x1A8, -- AdditionalKeywordTags word 3
+}
+
+function UObjectUtils.EnsureUpgradeDefinitionBridges()
+    if type(RegisterCustomProperty) ~= "function" or type(PropertyTypes) ~= "table" or not PropertyTypes.Int64Property then
+        return false
+    end
+    if RegisteredCustomProps["Mod_UpgDefWords"] then
+        return true
+    end
+    local allOk = true
+    for idx = 0, 12 do
+        local propName = "Mod_UpgWord_" .. tostring(idx)
+        local off = UPGRADE_DEF_WORD_OFFSETS[idx]
+        local ok = pcall(function()
+            RegisterCustomProperty({
+                Name = propName,
+                Type = PropertyTypes.Int64Property,
+                BelongsToClass = "/Script/Pagoda.PagodaPlayerUpgradeDefinition",
+                OffsetInternal = off,
+            })
+        end)
+        if not ok then allOk = false end
+    end
+    if allOk then
+        RegisteredCustomProps["Mod_UpgDefWords"] = true
+    end
+    return allOk
 end
 
 return UObjectUtils

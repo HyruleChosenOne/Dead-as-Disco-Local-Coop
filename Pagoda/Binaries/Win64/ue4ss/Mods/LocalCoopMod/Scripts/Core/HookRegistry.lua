@@ -1,16 +1,6 @@
--- ============================================================================
--- HOOK REGISTRY (PROPER PRE / POST / DEFERRED SEMANTICS & MISSING REPORTING)
--- ============================================================================
--- Fixes legacy HookManager bugs:
---   * Never runs postCallback pre-call alongside preCallback.
---   * Returns a real UE4SS post-hook closure ONLY when postFn is supplied
---     (and opts.DeferredPost ~= true); otherwise returns nothing so non-void
---     UFunction return values remain untouched.
---   * Supports opts.DeferredPost + opts.CaptureFn to safely extract parameters
---     pre-call and run post-logic cleanly on the next EngineTick.
---   * Explicitly logs missing native hooks immediately and reports missing
---     script hooks once gameplay loads (zero silent failures).
--- ============================================================================
+-- Hook registration wrapper with pre/post/deferred dispatch and unresolved hook tracking.
+-- Non-void UFunctions must omit postFn or pass opts.DeferredPost = true so UE4SS does not
+-- overwrite their return values with a post-hook closure.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -18,7 +8,8 @@ local Scheduler = require("Core.Scheduler")
 
 local HookRegistry = {}
 
-local Hooks = {}           -- [funcPath] = { Kind, Path, Registered, Calls, Errors, ReportedMissing }
+local MAX_HOOK_RETRIES = 10
+local Hooks = {}           -- [funcPath] = { Kind, Path, Registered, Calls, Errors, Retries, ReportedMissing }
 local ObjectNotifiers = {} -- [classPath] = true
 
 local function RegisterInternal(kind, funcPath, preFn, postFn, opts)
@@ -38,6 +29,7 @@ local function RegisterInternal(kind, funcPath, preFn, postFn, opts)
         Registered = false,
         Calls = 0,
         Errors = 0,
+        Retries = 0,
         ReportedMissing = false,
     }
     Hooks[funcPath] = rec
@@ -119,8 +111,16 @@ local function RegisterInternal(kind, funcPath, preFn, postFn, opts)
         Logger.Debug("HookRegistry", "Registered %s hook: %s", kind, funcPath)
         return true
     else
+        local errStr = tostring(regErr)
+        if errStr:find("UFunction::Func: 0x0", 1, true) and (rec.Retries or 0) < MAX_HOOK_RETRIES then
+            rec.Retries = (rec.Retries or 0) + 1
+            Scheduler.ReplaceDelay(60, "HookRetry:" .. funcPath, function()
+                RegisterInternal(kind, funcPath, preFn, postFn, opts)
+            end)
+            return false
+        end
         rec.Errors = rec.Errors + 1
-        Logger.Warn("HookRegistry", "RegisterHook failed for '%s': %s", funcPath, tostring(regErr))
+        Logger.Warn("HookRegistry", "RegisterHook failed for '%s': %s", funcPath, errStr)
         return false
     end
 end

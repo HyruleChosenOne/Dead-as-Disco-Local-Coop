@@ -1,11 +1,4 @@
--- ============================================================================
--- DYNAMIC DIVE BAR "CONNECT PLAYER 2" PROMPT WIDGET
--- ============================================================================
--- Displays a crisp neon Dive Bar prompt showing P2 join hotkeys
--- ([L3 + R3] or [F6]) ONLY while in the Dive Bar, solo (P2 not connected),
--- unpaused, not in cutscene, and with no fullscreen modal menu open.
--- Auto-hides cleanly when Player 2 connects or leaves the Dive Bar.
--- ============================================================================
+-- Dive Bar drop-in prompt showing Player 2 join bindings and connection status.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local SessionManager = require("Core.SessionManager")
@@ -20,6 +13,8 @@ local HoldProgress = 0.0
 local IsConnecting = false
 local ConnectingStatus = "CONNECTING PLAYER 2"
 local ConnectedFlashUntil = 0.0
+local LastVisualState = nil
+local LastConnectingText = nil
 
 local UI = {
     Widget = nil,
@@ -60,6 +55,8 @@ function JoinPrompt.Destroy()
     HoldProgress = 0.0
     IsConnecting = false
     ConnectedFlashUntil = 0.0
+    LastVisualState = nil
+    LastConnectingText = nil
 end
 
 function JoinPrompt.Hide()
@@ -139,7 +136,7 @@ local function EnsureBuilt(ownerPC, world)
 
         local card = StaticConstructObject(cls.Border, wt)
         UITheme.StyleDiscoFrame(card, UITheme.Colors.PanelBackdrop, UITheme.Colors.Magenta, 2.0, 3.0)
-        card:SetPadding({ Left = 10, Top = 8, Right = 14, Bottom = 8 })
+        card:SetPadding({ Left = 11, Top = 8, Right = 14, Bottom = 8 })
         UITheme.ApplyNativeSkew(card, -7.0)
 
         local cSlot = root:AddChildToCanvas(card)
@@ -235,38 +232,57 @@ function JoinPrompt.Tick(now)
     end
 
     if now < ConnectedFlashUntil then
-        SetHotkeysVisible(false)
-        UITheme.SetText(UI.TitleText, "PLAYER 2 CONNECTED!")
-        UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Emerald)
-        UITheme.SetFill(UI.AccentBar, UITheme.Colors.Emerald)
-        UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Emerald, 2.0)
-        pcall(function() UI.Card:SetRenderOpacity(1.0) end)
+        if LastVisualState ~= "Connected" then
+            LastVisualState = "Connected"
+            LastConnectingText = nil
+            SetHotkeysVisible(false)
+            UITheme.SetText(UI.TitleText, "PLAYER 2 CONNECTED")
+            UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Emerald)
+            UITheme.SetFill(UI.AccentBar, UITheme.Colors.Emerald)
+            UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Emerald, 2.0)
+            pcall(function() UI.Card:SetRenderOpacity(1.0) end)
+        end
     elseif IsConnecting then
-        SetHotkeysVisible(false)
         local dots = string.rep(".", (math.floor(now * 4.0) % 3) + 1)
-        UITheme.SetText(UI.TitleText, ConnectingStatus .. dots)
-        UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Cyan)
-        UITheme.SetFill(UI.AccentBar, UITheme.Colors.Cyan)
-        UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Cyan, 2.0)
-        pcall(function() UI.Card:SetRenderOpacity(1.0) end)
+        local text = ConnectingStatus .. dots
+        if LastVisualState ~= "Connecting" then
+            LastVisualState = "Connecting"
+            SetHotkeysVisible(false)
+            UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Cyan)
+            UITheme.SetFill(UI.AccentBar, UITheme.Colors.Cyan)
+            UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Cyan, 2.0)
+            pcall(function() UI.Card:SetRenderOpacity(1.0) end)
+        end
+        if text ~= LastConnectingText then
+            LastConnectingText = text
+            UITheme.SetText(UI.TitleText, text)
+        end
     elseif HoldProgress > 0.05 then
-        SetHotkeysVisible(true)
-        UITheme.SetText(UI.TitleText, "CONNECTING PLAYER 2...")
-        UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Emerald)
-        UITheme.SetFill(UI.AccentBar, UITheme.Colors.Emerald)
-        UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Emerald, 2.0)
-        UITheme.SetFill(UI.PadPill, UITheme.Colors.EmeraldSoft)
-        UITheme.SetTextColor(UI.PadText, UITheme.Colors.Emerald)
-        pcall(function() UI.Card:SetRenderOpacity(1.0) end)
+        if LastVisualState ~= "Hold" then
+            LastVisualState = "Hold"
+            LastConnectingText = nil
+            SetHotkeysVisible(true)
+            UITheme.SetText(UI.TitleText, "CONNECTING PLAYER 2...")
+            UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Emerald)
+            UITheme.SetFill(UI.AccentBar, UITheme.Colors.Emerald)
+            UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Emerald, 2.0)
+            UITheme.SetFill(UI.PadPill, UITheme.Colors.EmeraldSoft)
+            UITheme.SetTextColor(UI.PadText, UITheme.Colors.Emerald)
+            pcall(function() UI.Card:SetRenderOpacity(1.0) end)
+        end
     else
-        SetHotkeysVisible(true)
-        local pulse = 0.84 + 0.16 * (0.5 + 0.5 * math.sin(now * 3.4))
-        UITheme.SetText(UI.TitleText, "CONNECT PLAYER 2")
-        UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Gold)
-        UITheme.SetFill(UI.AccentBar, UITheme.Colors.Magenta)
-        UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Magenta, 1.5)
-        UITheme.SetFill(UI.PadPill, UITheme.Colors.CyanSoft)
-        UITheme.SetTextColor(UI.PadText, UITheme.Colors.Cyan)
+        if LastVisualState ~= "Idle" then
+            LastVisualState = "Idle"
+            LastConnectingText = nil
+            SetHotkeysVisible(true)
+            UITheme.SetText(UI.TitleText, "CONNECT PLAYER 2")
+            UITheme.SetTextColor(UI.TitleText, UITheme.Colors.Gold)
+            UITheme.SetFill(UI.AccentBar, UITheme.Colors.Magenta)
+            UITheme.SetOutlineColor(UI.Card, UITheme.Colors.Magenta, 1.6)
+            UITheme.SetFill(UI.PadPill, UITheme.Colors.CyanSoft)
+            UITheme.SetTextColor(UI.PadText, UITheme.Colors.Cyan)
+        end
+        local pulse = 0.86 + 0.14 * (0.5 + 0.5 * math.sin(now * 3.4))
         pcall(function() UI.Card:SetRenderOpacity(pulse) end)
     end
 end

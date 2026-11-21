@@ -1,17 +1,4 @@
--- ============================================================================
--- DEAD AS DISCO - LOCAL CO-OP MULTIPLAYER MOD (v1.0 Experimental)
--- ============================================================================
--- Modular Architecture:
---   * Utils/      Logger, UObjectUtils, Json
---   * Core/       Scheduler (single Game-Thread loop), HookRegistry, SessionManager
---   * State/      CatalogService, ProfileStore, PlayerStateIsolation
---   * Characters/ PakScanner, CharacterApplier (Vanilla + CSM full visual stack)
---   * Camera/     ViewportController (Split-Screen, Cutscene/Pause collapse, Midpoint Cam)
---   * Input/      InputRouting (per-player native locks, P2 pad routing, Pause safety)
---   * Gameplay/   ReviveSystem (Clean FSM, GAS effects, Proximity Hold UI, Wipe)
---   * UI/         UITheme, VanillaHUD (Native P2 HUD widgets), JoinPrompt,
---                 P2Menu (5-Tab), Notifications
--- ============================================================================
+-- Dead as Disco - Local Co-op Mod (v1.0 Experimental) entry point.
 
 print("[Dead as Disco - Local Co-op Mod] Booting v1.0 (Experimental)...\n")
 
@@ -28,6 +15,7 @@ local CharacterApplier     = require("Characters.CharacterApplier")
 local ViewportController   = require("Camera.ViewportController")
 local InputRouting         = require("Input.InputRouting")
 local ReviveSystem         = require("Gameplay.ReviveSystem")
+local EnemyAIDirector      = require("Gameplay.EnemyAIDirector")
 local UITheme              = require("UI.UITheme")
 local Notifications        = require("UI.Notifications")
 local JoinPrompt           = require("UI.JoinPrompt")
@@ -87,7 +75,9 @@ local function ApplyFullP2Setup(p1Ctrl, p2Ctrl)
     PlayerStateIsolation.ApplyDancesAndSkillsToP2(p1Ctrl, p2Ctrl, p2Pawn)
     CharacterApplier.ApplyP2VisualStyling(p2Pawn)
 
-    if not ViewportController.InCutsceneFullscreen and not ViewportController.InPauseFullscreen then
+    if not ViewportController.InCutsceneFullscreen
+        and not ViewportController.InPauseFullscreen
+        and not ViewportController.InP1MenuFullscreen then
         ViewportController.ApplyScreenMode(ViewportController.CurrentScreenMode, true)
     end
     ViewportController.SuppressP2DiveBarCredits()
@@ -101,7 +91,7 @@ local function ApplyFullP2Setup(p1Ctrl, p2Ctrl)
         ReviveSystem.ProtectPawn(1, p2Pawn, p2Ctrl)
     end
 
-    -- Coalesced post-streaming pass after async BeginPlay / CosmeticComponent loads settle
+    -- Post-streaming pass after async BeginPlay and CosmeticComponent loads settle.
     Scheduler.ReplaceDelay(420, "Main.PostSpawnVerify", function()
         if not SessionManager.IsSafeForGameplayHooks() then return end
         SessionManager.RefreshControllers()
@@ -111,7 +101,9 @@ local function ApplyFullP2Setup(p1Ctrl, p2Ctrl)
             PlayerStateIsolation.IsolatePlayer2State(c1, c2)
             CharacterApplier.ReassertMeshOnly(pawn2)
             PlayerStateIsolation.ApplyDancesAndSkillsToP2(c1, c2, pawn2)
-            if not ViewportController.InCutsceneFullscreen and not ViewportController.InPauseFullscreen then
+            if not ViewportController.InCutsceneFullscreen
+                and not ViewportController.InPauseFullscreen
+                and not ViewportController.InP1MenuFullscreen then
                 ViewportController.ApplyScreenMode(ViewportController.CurrentScreenMode, true)
             end
             ViewportController.SuppressP2DiveBarCredits()
@@ -206,15 +198,19 @@ PlayerStateIsolation.Init(Config)
 CharacterApplier.Init(Config, {
     SaveProfile = SaveP2Profile,
     Notify = Notify,
+    OnCharacterApplied = P2Menu.Refresh,
 })
 Notifications.Init(Config, {
     IsP2MenuOpen = P2Menu.IsOpen,
 })
 JoinPrompt.Init(Config)
-ReviveOverlay.Init(Config)
+ReviveOverlay.Init(Config, {
+    IsP2MenuOpen = P2Menu.IsOpen,
+})
 
 ViewportController.Init(Config, {
     CloseP2MenuIfOpen = function() if P2Menu.IsOpen() then P2Menu.Close(true) end end,
+    IsAnyNativeMenuOpen = InputRouting.IsAnyNativeMenuOpen,
     OnScreenModeChanged = function()
         P2Menu.OnScreenModeChanged()
         VanillaHUD.InvalidateMatchState()
@@ -261,7 +257,10 @@ ProfileStore.Init(Config, {
             if prefs.ScreenMode == 0 or prefs.ScreenMode == 1 then
                 ViewportController.LastSplitScreenMode = prefs.ScreenMode
             end
-            if SessionManager.IsP2Active() and not ViewportController.InCutsceneFullscreen and not ViewportController.InPauseFullscreen then
+            if SessionManager.IsP2Active()
+                and not ViewportController.InCutsceneFullscreen
+                and not ViewportController.InPauseFullscreen
+                and not ViewportController.InP1MenuFullscreen then
                 ViewportController.ApplyScreenMode(ViewportController.CurrentScreenMode, true)
             end
         end
@@ -292,8 +291,12 @@ SessionManager.Init(Config, {
     SaveProfile = SaveP2Profile,
     OnWorldChanged = function()
         CatalogService.OnWorldChanged()
+        PlayerStateIsolation.OnWorldChanged()
+        CharacterApplier.OnWorldChanged()
+        UITheme.OnWorldChanged()
         ViewportController.ResetOnWorldRestart()
         ReviveSystem.Reset()
+        EnemyAIDirector.Reset()
         ReviveOverlay.Destroy()
         PlayerMarkers.Destroy()
         P2Menu.OnWorldChanged()
@@ -342,6 +345,7 @@ SessionManager.Init(Config, {
         VanillaHUD.Destroy()
         PlayerMarkers.Destroy()
         ReviveSystem.Reset()
+        EnemyAIDirector.Reset()
         ReviveOverlay.Destroy()
         ViewportController.ReleaseSharedMidpointCamera(0.10)
         ViewportController.InCutsceneFullscreen = false
@@ -380,6 +384,17 @@ ReviveSystem.Init(Config, {
             end
         end
         VanillaHUD.Sync()
+    end,
+})
+
+EnemyAIDirector.Init(Config, {
+    IsPlayerDowned = function(pid)
+        local s = ReviveSystem.Players[pid]
+        return s ~= nil and (s.State == "Downed" or s.State == "BeingRevived")
+    end,
+    IsPlayerInvulnerable = function(pid)
+        local s = ReviveSystem.Players[pid]
+        return s ~= nil and s.State == "Invulnerable"
     end,
 })
 
@@ -519,12 +534,12 @@ P2Menu.Init(Config, {
 
 InstallRuntimeHooks = function()
     local inCfg = Config.Input or {}
-    local vpCfg = Config.Viewport or {}
 
     -- 1. ClientRestart: PRE isolates P2 PlayerState; DeferredPost restores session & HUD
     HookRegistry.RegisterNative(
         "/Script/Engine.PlayerController:ClientRestart",
         function(Context)
+            SessionManager.MarkControllersDirty()
             local pc = Context:get()
             if UObjectUtils.IsLive(pc) and SessionManager.GetPlayerIndex(pc) == 1 then
                 PlayerStateIsolation.IsolatePlayer2State(SessionManager.GetP1(), pc)
@@ -536,7 +551,8 @@ InstallRuntimeHooks = function()
                 if SessionManager.State.Phase == "Spawning" or SessionManager.State.Phase == "Despawning" then return end
                 ViewportController.ResetOnWorldRestart()
                 ReviveSystem.Reset()
-                if not P2Menu.IsOpen() then P2Menu.OnWorldChanged() end
+                EnemyAIDirector.Reset()
+                P2Menu.OnWorldChanged()
                 VanillaHUD.Destroy()
                 InstallRuntimeHooks()
                 InitEngineState()
@@ -600,7 +616,7 @@ InstallRuntimeHooks = function()
         end)
     end
 
-    -- 4. Async Cosmetics & Dive Bar Wardrobe Close -> Reassert P2 Visual Stack
+    -- Reassert P2 visuals after async cosmetic loads and Dive Bar menu closes.
     local function OnCosmeticsApplied(Context)
         if not SessionManager.IsSafeForGameplayHooks() then return end
         local comp = Context:get()
@@ -608,7 +624,8 @@ InstallRuntimeHooks = function()
         local owner = comp:GetOwner()
         if not UObjectUtils.IsLive(owner) then return end
 
-        Scheduler.Defer("OnCosmeticsApplied", function()
+        local ownerKey = UObjectUtils.GetKey(owner) or "0"
+        Scheduler.Defer("OnCosmeticsApplied:" .. ownerKey, function()
             if not (SessionManager.IsSafeForGameplayHooks() and UObjectUtils.IsLive(owner)) then return end
             SessionManager.RefreshControllers()
             local p2Pawn = SessionManager.GetP2Pawn()
@@ -623,14 +640,14 @@ InstallRuntimeHooks = function()
     HookRegistry.RegisterScript("/Game/Pagoda/UI/Cosmetics/WBP_Cosmetics_Main.WBP_Cosmetics_Main_C:BP_OnActivated", function()
         InputRouting.InvalidateMenuCache()
         VanillaHUD.InvalidateMatchState()
-        Scheduler.Delay(35, "DiveBar.CosmeticsP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
+        Scheduler.ReplaceDelay(35, "DiveBar.CosmeticsP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
     end)
 
     HookRegistry.RegisterScript("/Game/Pagoda/UI/Cosmetics/WBP_Cosmetics_Main.WBP_Cosmetics_Main_C:BP_OnDeactivated", function()
         InputRouting.InvalidateMenuCache()
         VanillaHUD.InvalidateMatchState()
-        Scheduler.Delay(40, "CosmeticsClose.RestoreP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
-        Scheduler.Delay(160, "CosmeticsClose.ReapplyP2", function()
+        Scheduler.ReplaceDelay(40, "CosmeticsClose.RestoreP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
+        Scheduler.ReplaceDelay(160, "CosmeticsClose.ReapplyP2", function()
             SessionManager.RefreshControllers()
             local p1, p2, p2Pawn = SessionManager.GetP1(), SessionManager.GetP2(), SessionManager.GetP2Pawn()
             if p2 and p2Pawn then
@@ -654,7 +671,7 @@ InstallRuntimeHooks = function()
         HookRegistry.RegisterScript(diveMenuHook, function()
             InputRouting.InvalidateMenuCache()
             VanillaHUD.InvalidateMatchState()
-            Scheduler.Delay(35, "DiveBar.MenuP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
+            Scheduler.ReplaceDelay(35, "DiveBar.MenuP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
         end)
     end
 
@@ -703,7 +720,7 @@ InstallRuntimeHooks = function()
     HookRegistry.RegisterScript("/Game/Pagoda/UI/BPFL_UI.BPFL_UI_C:PushToGameUIStack", function()
         InputRouting.InvalidateMenuCache()
         VanillaHUD.InvalidateMatchState()
-        Scheduler.Delay(25, "UIStack.PauseGuard", function()
+        Scheduler.ReplaceDelay(25, "UIStack.PauseGuard", function()
             InputRouting.InvalidateMenuCache()
             VanillaHUD.InvalidateMatchState()
             if inCfg.RoutePauseMenuToPrimaryViewport ~= false and InputRouting.IsGamePaused() then
@@ -726,7 +743,7 @@ InstallRuntimeHooks = function()
     end)
 
     HookRegistry.RegisterNative("/Script/Pagoda.PagodaGamePauseSubsystem:SetIsPaused", function()
-        Scheduler.Delay(30, "PauseSubsystem.Post", function()
+        Scheduler.ReplaceDelay(30, "PauseSubsystem.Post", function()
             if P2Menu.IsPausedByP2Menu() then
                 VanillaHUD.Sync()
                 return
@@ -796,7 +813,7 @@ InstallRuntimeHooks = function()
     -- 7. Cutscene Fullscreen Collapse (filters out Takedown / Finisher / P2 cameras)
     HookRegistry.RegisterNative("/Script/Engine.PlayerController:SetCinematicMode", function(_, bInCinematic)
         local enabled = bInCinematic and bInCinematic:get()
-        Scheduler.Defer("CinematicMode", function()
+        Scheduler.Defer("CinematicMode:" .. tostring(enabled), function()
             if enabled == true then
                 ViewportController.EnterCutsceneFullscreen("SetCinematicMode")
             elseif enabled == false then
@@ -868,7 +885,8 @@ InstallRuntimeHooks = function()
         local widget = Context and Context:get() or nil
         local z = (ZOrder and ZOrder:get()) or 0
         if UObjectUtils.IsLive(widget) and ViewportController.IsSplitScreenActive() then
-            Scheduler.Defer("ConfineWidget", function()
+            local wKey = UObjectUtils.GetKey(widget) or "0"
+            Scheduler.Defer("ConfineWidget:" .. wKey, function()
                 if UObjectUtils.IsLive(widget) then
                     ViewportController.ConfineRootHUDWidget(widget, z)
                 end
@@ -901,7 +919,6 @@ InstallRuntimeHooks = function()
         end)
     end
 
-    -- 9. Event-Driven Gamepad AnyKey Listener (routes all P2 gamepad key events)
     local function HandleAnyGamepadKey(Context, KeyParam)
         local pc = Context:get()
         if not UObjectUtils.IsLive(pc) then return end
@@ -909,13 +926,6 @@ InstallRuntimeHooks = function()
         local keyName = (ks and ks.KeyName and ks.KeyName:ToString()) or ""
         if keyName:find("^Gamepad_") then
             InputRouting.OnGamepadKey(pc, keyName)
-            if keyName == (inCfg.GamepadMenuToggleKey or "Gamepad_Special_Left") then
-                Scheduler.Delay(160, "Input.ChordFollowup", function()
-                    if UObjectUtils.IsLive(pc) then
-                        InputRouting.OnGamepadKey(pc, nil)
-                    end
-                end, true)
-            end
         end
     end
     HookRegistry.RegisterScript(
@@ -923,8 +933,90 @@ InstallRuntimeHooks = function()
         HandleAnyGamepadKey
     )
 
-    -- Silence unused variable warning cleanly
-    local _ = vpCfg
+    -- 10. Co-op Enemy AI Aggro Subsystem & Attack/Dodge Prompts Synchronization
+    HookRegistry.RegisterNative(
+        "/Script/Pagoda.PagodaAIAggroSubsystem:OnUpdateMoveTargetPlayers",
+        nil,
+        function()
+            EnemyAIDirector.OnAggroSubsystemUpdated()
+        end,
+        { DeferredPost = true }
+    )
+
+    HookRegistry.RegisterScript(
+        "/Game/Pagoda/UI/Game/NPCIndicators/WBP_NPCIndicator_Attack_Single.WBP_NPCIndicator_Attack_Single_C:SetDisplayFarAwayIndicator",
+        function(Context, bFarAway)
+            local single = Context and Context:get() or nil
+            if UObjectUtils.IsLive(single) then
+                VanillaHUD.OnAttackSingleSetFarAway(single, bFarAway)
+            end
+        end
+    )
+
+    HookRegistry.RegisterScript(
+        "/Game/Pagoda/UI/Game/NPCIndicators/WBP_NPCIndicator_Attack_Single.WBP_NPCIndicator_Attack_Single_C:SetInteractionEnabled",
+        function(Context, bEnabled)
+            local single = Context and Context:get() or nil
+            if UObjectUtils.IsLive(single) then
+                VanillaHUD.OnAttackSingleSetInteraction(single, bEnabled)
+            end
+        end
+    )
+
+    HookRegistry.RegisterScript(
+        "/Game/Pagoda/UI/Game/NPCIndicators/WBP_NPCIndicator_Attack_Master.WBP_NPCIndicator_Attack_Master_C:UpdateIndicators",
+        function(Context)
+            local w = Context and Context:get() or nil
+            if UObjectUtils.IsLive(w) then VanillaHUD.OnAttackIndicatorPreUpdate(w) end
+        end,
+        function(Context)
+            local w = Context and Context:get() or nil
+            if UObjectUtils.IsLive(w) then VanillaHUD.OnAttackIndicatorPostUpdate(w) end
+        end
+    )
+
+    HookRegistry.RegisterScript(
+        "/Game/Pagoda/UI/Game/NPCIndicators/WBP_NPCIndicator_Attack_Master.WBP_NPCIndicator_Attack_Master_C:Tick",
+        nil,
+        function(Context)
+            local w = Context and Context:get() or nil
+            if UObjectUtils.IsLive(w) then VanillaHUD.OnAttackIndicatorPostUpdate(w, true) end
+        end
+    )
+
+    HookRegistry.RegisterScript(
+        "/Game/Pagoda/UI/Game/NPCIndicators/WBP_NPCIndicator_Attack_Master.WBP_NPCIndicator_Attack_Master_C:BindIndicator",
+        function(Context)
+            local w = Context and Context:get() or nil
+            if UObjectUtils.IsLive(w) then VanillaHUD.OnAttackIndicatorPreUpdate(w) end
+        end,
+        function(Context)
+            local w = Context and Context:get() or nil
+            if UObjectUtils.IsLive(w) then VanillaHUD.OnAttackIndicatorPostUpdate(w) end
+        end
+    )
+
+    for _, enemyIndHook in ipairs({
+        "/Game/Pagoda/Characters/Enemies/Components/BP_TimedIndicatorsComponent.BP_TimedIndicatorsComponent_C:TryRegisterIndicators",
+        "/Game/Pagoda/Characters/Enemies/Components/BP_TimedIndicatorsComponent.BP_TimedIndicatorsComponent_C:SetIndicatorOnTarget",
+        "/Game/Pagoda/Characters/Enemies/Components/BP_TimedIndicatorsComponent.BP_TimedIndicatorsComponent_C:CacheTimedIndicatorData",
+    }) do
+        HookRegistry.RegisterScript(
+            enemyIndHook,
+            function(Context)
+                local comp = Context and Context:get() or nil
+                if UObjectUtils.IsLive(comp) then
+                    VanillaHUD.OnEnemyIndicatorPre(comp)
+                end
+            end,
+            function(Context)
+                local comp = Context and Context:get() or nil
+                if UObjectUtils.IsLive(comp) then
+                    VanillaHUD.OnEnemySetIndicatorOnTarget(comp)
+                end
+            end
+        )
+    end
 end
 
 -- ============================================================================
@@ -940,16 +1032,26 @@ HookRegistry.NotifyNewObject("/Script/Pagoda.PagodaUILayoutWidget", function(obj
     if UObjectUtils.IsLive(obj) then ViewportController.RefreshLayoutLocalization(obj) end
 end, false)
 
+HookRegistry.NotifyNewObject("/Script/Pagoda.PagodaPlayerController", function()
+    SessionManager.MarkControllersDirty()
+    InstallRuntimeHooks()
+    VanillaHUD.Sync()
+end, false)
+
 for _, clsPath in ipairs({
-    "/Script/Pagoda.PagodaPlayerController",
     "/Script/Engine.LevelSequenceActor",
     "/Game/Pagoda/Levels/DiveBar/BP_DiveBar_Interact_Cosmetics.BP_DiveBar_Interact_Cosmetics_C",
     "/Game/Pagoda/Levels/DiveBar/BP_DiveBar_Interact_SkillTree.BP_DiveBar_Interact_SkillTree_C",
     "/Game/Pagoda/UI/Game/WBP_LevelEndScreen.WBP_LevelEndScreen_C",
+    "/Game/Pagoda/UI/Game/NPCIndicators/WBP_NPCIndicator_Attack_Master.WBP_NPCIndicator_Attack_Master_C",
+    "/Game/Pagoda/UI/Game/NPCIndicators/WBP_NPCIndicator_Attack_Single.WBP_NPCIndicator_Attack_Single_C",
+    "/Game/Pagoda/Characters/Enemies/Components/BP_TimedIndicatorsComponent.BP_TimedIndicatorsComponent_C",
 }) do
     HookRegistry.NotifyNewObject(clsPath, function()
-        InstallRuntimeHooks()
-        VanillaHUD.Sync()
+        Scheduler.Defer("Hooks.RefreshOnNewObj", function()
+            InstallRuntimeHooks()
+            VanillaHUD.Sync()
+        end)
     end, false)
 end
 
@@ -972,18 +1074,18 @@ Scheduler.Every(50, "FastInteractive", function(now)
     InputRouting.TickJoinChord(now)
     JoinPrompt.Tick(now)
     ReviveSystem.Tick(now)
+    EnemyAIDirector.Tick(now)
     Notifications.Tick(now)
-    if (now - LastFastHudSyncAt) >= 0.20 then
+    if (now - LastFastHudSyncAt) >= 0.25 then
         LastFastHudSyncAt = now
         VanillaHUD.Sync()
     end
 end)
 
--- 500ms loop: Auto-gamepad detection, native P2 HUD verification & P1 menu P2 visibility sync
+-- 500ms loop: Auto-gamepad detection & P1 menu P2 visibility sync
 Scheduler.Every(500, "HUDSyncAndInput", function(now)
     InputRouting.TickAutoGamepadRouting(now)
     ViewportController.SyncP1MenuP2Visibility()
-    VanillaHUD.Sync()
 end)
 
 -- 1000ms maintenance: GC cleanup, world transition check, singleton guard, isolation audit, CSM & leash
@@ -1053,6 +1155,7 @@ _G.__LocalCoopMod = {
     ViewportController = ViewportController,
     InputRouting = InputRouting,
     ReviveSystem = ReviveSystem,
+    EnemyAIDirector = EnemyAIDirector,
     ReviveOverlay = ReviveOverlay,
     UITheme = UITheme,
     Notifications = Notifications,

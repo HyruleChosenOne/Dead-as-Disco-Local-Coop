@@ -1,21 +1,5 @@
--- ============================================================================
--- REFINED 5-TAB PLAYER 2 MENU (STRICT P2-ONLY INPUT & SMOOTH TRANSITIONS)
--- ============================================================================
--- Tabs:
---   1. CHARACTER : Models (Vanilla + CSM), Outfits, Gear & P2 Tint
---   2. MOVES     : 4-Slot Boss Skill Diamond + Loadout Presets
---   3. DANCES    : 4-Slot D-Pad Wheel + Dances
---   4. UPGRADES  : Dynamic Idol Trees + P2-only Unlock All
---   5. SETTINGS  : Session, Screen Mode, Native P2 HUD Scale,
---                  Controllers, Midpoint Cam, FOV, Experimental & Diagnostics
---
--- Input Isolation Guarantees:
---   * Uses InputRouting.SetPlayerInputLock(p2Ctrl, "LocalCoop.P2MenuOpen", true)
---     so P2's menu inputs NEVER leak into combat while P1 keeps full control!
---   * Polls EXCLUSIVELY p2Ctrl gamepad hardware inputs (never hijacks P1 pad!).
---   * Optional keyboard nav only when Config.P2Menu.AllowKeyboardNavigation == true.
---   * Strict stick deadzone (0.55) + axis dominance (1.4x) avoids diagonal misfires.
--- ============================================================================
+-- 5-tab Player 2 customization and settings menu (Dive Bar full mode / mid-match paused mode).
+-- Polls P2's controller exclusively while locking P2 gameplay input so P1 stays uninterrupted.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -194,10 +178,6 @@ end
 
 function P2Menu.IsPausedByP2Menu()
     return State.IsOpen == true and State.PausedGameForMenu == true
-end
-
-function P2Menu.GetWidget()
-    return UI.Widget
 end
 
 -- ============================================================================
@@ -407,7 +387,8 @@ local function EnsureBuilt(ownerPC)
         local brandTxt = StaticConstructObject(cls.Text, wt)
         UITheme.StyleText(brandTxt, 13, UITheme.Fonts.Primary, UITheme.Colors.Gold, false)
         UITheme.SetText(brandTxt, "PLAYER 2")
-        brandHdrH:AddChildToHorizontalBox(brandTxt)
+        local btS1 = brandHdrH:AddChildToHorizontalBox(brandTxt)
+        pcall(function() btS1:SetVerticalAlignment(2) end)
 
         local brandTxt2 = StaticConstructObject(cls.Text, wt)
         UITheme.StyleText(brandTxt2, 13, UITheme.Fonts.Primary, UITheme.Colors.TextPrimary, false)
@@ -479,8 +460,9 @@ local function EnsureBuilt(ownerPC)
         local lbS = railV:AddChildToVerticalBox(lbCue)
         pcall(function() lbS:SetPadding({ Left = 0, Top = 4, Right = 0, Bottom = 5 }) end)
 
-        local isoPill, isoTxt = UITheme.MakePillBadge(wt, cls, "P2 ISOLATED", UITheme.Colors.EmeraldSoft, UITheme.Colors.Emerald, 8)
+        local isoPill, isoTxt = UITheme.MakePillBadge(wt, cls, "PAUSED | MATCH", UITheme.Colors.GoldSoft, UITheme.Colors.Gold, 8)
         railV:AddChildToVerticalBox(isoPill)
+        pcall(function() isoPill:SetVisibility(1) end) -- Hidden unless in-match paused mode
         UI.IsoPill = isoPill
         UI.IsoText = isoTxt
 
@@ -634,7 +616,7 @@ local function EnsureBuilt(ownerPC)
         filterCard:SetContent(filtH)
 
         local prevBtn, prevCard = UITheme.MakeCleanButtonCard(
-            wt, cls, UITheme.Colors.SurfaceRaised, 2.5, nil, 0.0, 5, 2, 5, 2
+            wt, cls, UITheme.Colors.SurfaceRaised, 3.0, UITheme.Colors.HairlineSubtle, 0.8, 6, 2, 6, 2
         )
         local prevTxt = StaticConstructObject(cls.Text, wt)
         UITheme.StyleText(prevTxt, 7, UITheme.Fonts.Secondary, UITheme.Colors.Cyan, false)
@@ -668,7 +650,7 @@ local function EnsureBuilt(ownerPC)
         end
 
         local nextBtn, nextCard = UITheme.MakeCleanButtonCard(
-            wt, cls, UITheme.Colors.SurfaceRaised, 4.0, nil, 0.0, 5, 2, 5, 2
+            wt, cls, UITheme.Colors.SurfaceRaised, 3.0, UITheme.Colors.HairlineSubtle, 0.8, 6, 2, 6, 2
         )
         local nextTxt = StaticConstructObject(cls.Text, wt)
         UITheme.StyleText(nextTxt, 7, UITheme.Fonts.Secondary, UITheme.Colors.Cyan, false)
@@ -690,17 +672,17 @@ local function EnsureBuilt(ownerPC)
 
         for r = 1, VISIBLE_ROWS do
             local rBox = StaticConstructObject(cls.SizeBox, wt)
-            pcall(function() rBox:SetHeightOverride(32.0) end)
+            pcall(function() rBox:SetHeightOverride(33.0) end)
 
             local rBtn, rCard = UITheme.MakeCleanButtonCard(
-                wt, cls, UITheme.Colors.SurfaceCard, 3.0, UITheme.Colors.HairlineSubtle, 1.0, 8, 3, 10, 3
+                wt, cls, UITheme.Colors.SurfaceCard, 3.0, UITheme.Colors.HairlineSubtle, 1.0, 9, 3, 10, 3
             )
             rBox:AddChild(rBtn)
 
             local rH = StaticConstructObject(cls.HBox, wt)
             rCard:SetContent(rH)
 
-            local barBox, rBar = UITheme.MakeAccentBar(wt, cls, 3.0, UITheme.Colors.Transparent)
+            local barBox, rBar = UITheme.MakeAccentBar(wt, cls, 3.5, UITheme.Colors.Transparent)
             local rbS = rH:AddChildToHorizontalBox(barBox)
             pcall(function() rbS:SetPadding({ Left = 0, Top = 2, Right = 8, Bottom = 2 }) end)
 
@@ -725,7 +707,7 @@ local function EnsureBuilt(ownerPC)
             pcall(function() pS:SetVerticalAlignment(2) end)
 
             local rvS = listV:AddChildToVerticalBox(rBox)
-            pcall(function() rvS:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = (r < VISIBLE_ROWS) and 2 or 0 }) end)
+            pcall(function() rvS:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = (r < VISIBLE_ROWS) and 3 or 0 }) end)
 
             UI.RowBoxes[r] = rBox
             UI.RowButtons[r] = rBtn
@@ -832,15 +814,15 @@ local function EnsureBuilt(ownerPC)
         UI.ScrollDownIcon = dnIcon
         UI.ScrollDownText = dnTxt
 
-        -- Inspector Card (ClipToBounds guarantees text never bleeds outside frame)
+        -- Inspector Card (ClipToBounds keeps long descriptions contained)
         local inspBox = StaticConstructObject(cls.SizeBox, wt)
-        pcall(function() inspBox:SetHeightOverride(78.0) end)
+        pcall(function() inspBox:SetHeightOverride(82.0) end)
         local inSlot = workV:AddChildToVerticalBox(inspBox)
         pcall(function() inSlot:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 5 }) end)
 
         local insp = StaticConstructObject(cls.Border, wt)
         UITheme.StyleDiscoFrame(insp, UITheme.Colors.SurfaceCard, UITheme.Colors.HairlineSubtle, 1.2, 3.0)
-        insp:SetPadding({ Left = 10, Top = 6, Right = 10, Bottom = 6 })
+        insp:SetPadding({ Left = 11, Top = 7, Right = 11, Bottom = 7 })
         pcall(function() insp:SetClipping(1) end) -- ClipToBounds
         inspBox:AddChild(insp)
 
@@ -1073,7 +1055,7 @@ local function RebuildTabModel()
                 Tag = "VISUAL TINT",
                 TagBg = UITheme.Colors.GoldSoft,
                 TagFg = UITheme.Colors.Gold,
-                Meta = isModChar and "APPLIES TO VANILLA CHARLIE (CSM PRESERVES SHADERS)" or "HOTKEY: F4",
+                Meta = isModChar and "APPLIES TO VANILLA CHARLIE (CSM PRESERVES SHADERS)" or "EXPERIMENTAL VISUAL HIGHLIGHT",
                 Description = "Cycles Player 2 highlight mode between AccentOnly, FullBody, and Off.",
                 OnActivate = function() if Callbacks.CycleTintMode then Callbacks.CycleTintMode() end end,
             }
@@ -1211,11 +1193,11 @@ local function RebuildTabModel()
             PillFg = allOn and UITheme.Colors.Emerald or UITheme.Colors.Gold,
             IsEquipped = allOn,
             ActionLabel = allOn and "RESET  [A]" or "UNLOCK ALL  [A]",
-            Tag = "P2 ISOLATED",
+            Tag = "UPGRADES",
             TagBg = UITheme.Colors.EmeraldSoft,
             TagFg = UITheme.Colors.Emerald,
-            Meta = "NEVER TOUCHES PLAYER 1 UPGRADES OR SAVE DATA",
-            Description = "Enables or resets all Idol skill tree upgrades strictly for Player 2.",
+            Meta = "UNLOCKS ALL IDOL SKILL TREE UPGRADES FOR PLAYER 2",
+            Description = "Enables or resets all Idol skill tree upgrades for Player 2.",
             OnActivate = function()
                 if Callbacks.ToggleUnlockAllUpgrades then Callbacks.ToggleUnlockAllUpgrades(not allOn) end
             end,
@@ -1238,7 +1220,7 @@ local function RebuildTabModel()
                 Tag = idolStyle.Full,
                 TagBg = idolStyle.Soft,
                 TagFg = idolStyle.Color,
-                Meta = isOn and "ACTIVE ON PLAYER 2 (P1 UNTOUCHED)" or "INACTIVE ON PLAYER 2",
+                Meta = isOn and "ACTIVE ON PLAYER 2" or "INACTIVE ON PLAYER 2",
                 Description = desc,
                 OnActivate = function() if Callbacks.ToggleUpgrade then Callbacks.ToggleUpgrade(entry.Def) end end,
             }
@@ -1266,28 +1248,22 @@ local function RebuildTabModel()
                 }
 
                 local fovOn = ViewportController.CustomFOVEnabled
-                local fovVal = math.floor((ViewportController.CustomFOV or 90) + 0.5)
+                local fovLabel = ViewportController.GetFOVModeLabel()
+                local fovTag = ViewportController.GetFOVModeShortTag()
                 items[#items + 1] = {
-                    Name = string.format("Camera FOV: %s", fovOn and (fovVal .. " deg") or "Default"),
-                    PillText = fovOn and tostring(fovVal) or "DEF",
+                    Name = "Camera FOV: " .. fovLabel,
+                    PillText = fovTag,
                     PillBg = fovOn and UITheme.Colors.CyanSoft or UITheme.Colors.TrackDark,
                     PillFg = fovOn and UITheme.Colors.Cyan or UITheme.Colors.TextMuted,
                     IsEquipped = fovOn,
-                    ActionLabel = "STEP  [A]",
+                    ActionLabel = "CYCLE  [A]",
                     Tag = "CAMERA FOV",
                     TagBg = UITheme.Colors.CyanSoft,
                     TagFg = UITheme.Colors.Cyan,
-                    Meta = "STEPS 80 -> 120 DEG (5 DEG) OR DEFAULT",
-                    Description = "Steps Camera FOV across 80-120 deg or returns to the game's Default FOV.",
+                    Meta = "OPTIONS: DEFAULT / WIDE / WIDER",
+                    Description = "Cycles Camera FOV between Default, Wide, and Wider.",
                     OnActivate = function()
-                        if not ViewportController.CustomFOVEnabled then
-                            ViewportController.CustomFOV = 75.0
-                            ViewportController.AdjustCustomFOV(5)
-                        elseif (ViewportController.CustomFOV or 90.0) >= 120.0 then
-                            ViewportController.ToggleCustomFOV()
-                        else
-                            ViewportController.AdjustCustomFOV(5)
-                        end
+                        ViewportController.CycleFOVPreset()
                     end,
                 }
 
@@ -1330,11 +1306,43 @@ local function RebuildTabModel()
                         if Callbacks.SaveProfile then UObjectUtils.SafeCall("Menu.SaveCircles", Callbacks.SaveProfile) end
                     end,
                 }
+
+                local dynCamOn = (ViewportController.DynamicSharedCameraEnabled ~= false)
+                items[#items + 1] = {
+                    Name = "Shared View Top-Down Camera",
+                    PillText = dynCamOn and "ON" or "OFF",
+                    PillBg = dynCamOn and UITheme.Colors.CyanSoft or UITheme.Colors.TrackDark,
+                    PillFg = dynCamOn and UITheme.Colors.Cyan or UITheme.Colors.TextMuted,
+                    IsEquipped = dynCamOn,
+                    ActionLabel = "TOGGLE  [A]",
+                    Tag = "SHARED CAMERA",
+                    TagBg = UITheme.Colors.CyanSoft,
+                    TagFg = UITheme.Colors.Cyan,
+                    Meta = dynCamOn and "TOP-DOWN MIDPOINT CAMERA ACTIVE IN SHARED VIEW" or "FOLLOWS PLAYER 1 CAMERA",
+                    Description = "Frames both Player 1 and Player 2 from an elevated top-down arena perspective in Shared View (on by default).",
+                    OnActivate = function() ViewportController.ToggleDynamicSharedCamera() end,
+                }
             end
 
             AddCommonCameraAndHudSettings()
 
             if not State.IsLimitedMatchMode then
+                local leashOn = SessionManager.State.AutoLeashEnabled
+                items[#items + 1] = {
+                    Name = "Auto-Leash P2 in Shared View",
+                    PillText = leashOn and "ON" or "OFF",
+                    PillBg = leashOn and UITheme.Colors.CyanSoft or UITheme.Colors.TrackDark,
+                    PillFg = leashOn and UITheme.Colors.Cyan or UITheme.Colors.TextMuted,
+                    IsEquipped = leashOn,
+                    ActionLabel = "TOGGLE  [A]",
+                    Tag = "SHARED CAMERA",
+                    TagBg = UITheme.Colors.CyanSoft,
+                    TagFg = UITheme.Colors.Cyan,
+                    Meta = "AUTO-WARPS P2 IF TOO FAR OFF-SCREEN",
+                    Description = "Automatically regroups Player 2 if separated far off-screen in Shared/Arena View.",
+                    OnActivate = function() SessionManager.ToggleAutoLeash() end,
+                }
+
                 items[#items + 1] = {
                     Name = "Controllers: " .. (InputRouting.OffsetGamepad and "1 KB/Mouse + 1 Pad" or "2 Gamepads"),
                     PillText = "SWAP",
@@ -1359,48 +1367,12 @@ local function RebuildTabModel()
                     Tag = "EXPERIMENTAL",
                     TagBg = UITheme.Colors.AmberSoft,
                     TagFg = UITheme.Colors.Amber,
-                    Meta = expOn and "TINTS, BOSS/ENEMY MODELS & ADVANCED SETTINGS UNLOCKED" or "ENABLE FOR TINTS, BOSS/ENEMY MODELS & DIAGNOSTICS",
-                    Description = "Unlocks experimental features: Character Rim Tints, playable SKEL_Humanoid Boss/Enemy models, Arena Midpoint & Diagnostics.",
+                    Meta = expOn and "TINTS, BOSS/ENEMY MODELS & DIAGNOSTICS UNLOCKED" or "ENABLE FOR TINTS, BOSS/ENEMY MODELS & DIAGNOSTICS",
+                    Description = "Unlocks experimental features: Character Rim Tints, playable SKEL_Humanoid Boss/Enemy models, and Diagnostics.",
                     OnActivate = function()
                         if Callbacks.ToggleExperimental then Callbacks.ToggleExperimental() end
                     end,
                 }
-            end
-
-            if expOn then
-                local dynCamOn = (ViewportController.DynamicSharedCameraEnabled == true)
-                items[#items + 1] = {
-                    Name = "Arena Camera Midpoint Tracking",
-                    PillText = dynCamOn and "ON" or "OFF",
-                    PillBg = dynCamOn and UITheme.Colors.EmeraldSoft or UITheme.Colors.TrackDark,
-                    PillFg = dynCamOn and UITheme.Colors.Emerald or UITheme.Colors.TextMuted,
-                    IsEquipped = dynCamOn,
-                    ActionLabel = "TOGGLE  [A]",
-                    Tag = "EXPERIMENTAL",
-                    TagBg = UITheme.Colors.EmeraldSoft,
-                    TagFg = UITheme.Colors.Emerald,
-                    Meta = dynCamOn and "MIDPOINT CAMERA + SCREEN-RELATIVE MOVEMENT" or "FOLLOWS PLAYER 1",
-                    Description = "Experimental dynamic midpoint camera framing both P1 and P2 in Arena mode.",
-                    OnActivate = function() ViewportController.ToggleDynamicSharedCamera() end,
-                }
-
-                if not State.IsLimitedMatchMode then
-                    local leashOn = SessionManager.State.AutoLeashEnabled
-                    items[#items + 1] = {
-                        Name = "Auto-Leash P2 in Arena Camera",
-                        PillText = leashOn and "ON" or "OFF",
-                        PillBg = leashOn and UITheme.Colors.EmeraldSoft or UITheme.Colors.TrackDark,
-                        PillFg = leashOn and UITheme.Colors.Emerald or UITheme.Colors.TextMuted,
-                        IsEquipped = leashOn,
-                        ActionLabel = "TOGGLE  [A]",
-                        Tag = "EXPERIMENTAL",
-                        TagBg = UITheme.Colors.EmeraldSoft,
-                        TagFg = UITheme.Colors.Emerald,
-                        Meta = "AUTO-WARPS P2 IF TOO FAR OFF-SCREEN",
-                        Description = "Automatically regroups Player 2 if separated far off-screen in Arena mode.",
-                        OnActivate = function() SessionManager.ToggleAutoLeash() end,
-                    }
-                end
             end
 
             items[#items + 1] = {
@@ -1572,22 +1544,22 @@ local function RefreshUI()
 
         local active = (i == State.TabIndex)
         UITheme.SetFill(UI.NavCards[i], active and UITheme.Colors.SurfaceSelected or UITheme.Colors.Transparent)
+        UITheme.SetOutlineColor(UI.NavCards[i],
+            active and (tDef.Accent or UITheme.Colors.Cyan) or UITheme.Colors.Transparent,
+            active and 1.2 or 0.0)
         UITheme.SetFill(UI.NavBars[i], active and (tDef.Accent or UITheme.Colors.Cyan) or UITheme.Colors.Transparent)
         UITheme.SetTextColor(UI.NavTexts[i], active and UITheme.Colors.TextPrimary or UITheme.Colors.TextSecondary)
     end
 
-    if State.IsLimitedMatchMode then
-        UITheme.SetFill(UI.IsoPill, UITheme.Colors.GoldSoft)
-        UITheme.SetTextColor(UI.IsoText, UITheme.Colors.Gold)
-        UITheme.SetText(UI.IsoText, "PAUSED | MATCH")
-    elseif PlayerStateIsolation.Status.Verified then
-        UITheme.SetFill(UI.IsoPill, UITheme.Colors.EmeraldSoft)
-        UITheme.SetTextColor(UI.IsoText, UITheme.Colors.Emerald)
-        UITheme.SetText(UI.IsoText, "P2 ISOLATED")
-    else
-        UITheme.SetFill(UI.IsoPill, UITheme.Colors.GoldSoft)
-        UITheme.SetTextColor(UI.IsoText, UITheme.Colors.Gold)
-        UITheme.SetText(UI.IsoText, "SYNCING P2")
+    if UObjectUtils.IsValid(UI.IsoPill) then
+        if State.IsLimitedMatchMode then
+            pcall(function() UI.IsoPill:SetVisibility(0) end)
+            UITheme.SetFill(UI.IsoPill, UITheme.Colors.GoldSoft)
+            UITheme.SetTextColor(UI.IsoText, UITheme.Colors.Gold)
+            UITheme.SetText(UI.IsoText, "PAUSED | MATCH")
+        else
+            pcall(function() UI.IsoPill:SetVisibility(1) end)
+        end
     end
 
     local secHdr = (State.IsLimitedMatchMode and tabDef.LimitedLabel) and tabDef.LimitedLabel or tabDef.Title
@@ -1596,7 +1568,7 @@ local function RefreshUI()
         UITheme.SetText(UI.LegendText,
             State.IsLimitedMatchMode
                 and "A  SELECT   |   LB / RB  TABS   |   B / SELECT  RESUME"
-                or  "A  SELECT   |   D-PAD L/R / LT/RT  SUB   |   R-STICK  SPIN")
+                or  "A  SELECT   |   LT / RT  SUB   |   R-STICK  SPIN")
     end
     local total = #State.Items
     local canScrollUp = (total > VISIBLE_ROWS) and (State.WindowStart > 1)
@@ -1673,6 +1645,7 @@ local function RefreshUI()
         end
     elseif showFilterBar then
         local subCount = #State.SubLabels
+        local pillCharLimit = (subCount <= 3) and 12 or 9
         UITheme.SetTextColor(UI.SubPrevText, subCount > 1 and UITheme.Colors.Cyan or UITheme.Colors.TextMuted)
         UITheme.SetTextColor(UI.SubNextText, subCount > 1 and UITheme.Colors.Cyan or UITheme.Colors.TextMuted)
         for p = 1, MAX_SUB_PILLS do
@@ -1680,10 +1653,10 @@ local function RefreshUI()
             if lbl and UObjectUtils.IsValid(UI.SubPillWraps[p]) then
                 pcall(function() UI.SubPillWraps[p]:SetVisibility(0) end)
                 local isActive = (p == State.SubIndex)
-                UITheme.SetText(UI.SubPillTexts[p], UITheme.Truncate(lbl, 9))
+                UITheme.SetText(UI.SubPillTexts[p], UITheme.Truncate(lbl, pillCharLimit))
                 if isActive then
                     UITheme.SetFill(UI.SubPillCards[p], tabAccent)
-                    UITheme.SetOutlineColor(UI.SubPillCards[p], UITheme.Colors.Gold, 1.2)
+                    UITheme.SetOutlineColor(UI.SubPillCards[p], UITheme.Colors.Gold, 1.3)
                     UITheme.SetTextColor(UI.SubPillTexts[p], UITheme.Colors.TextDark)
                 else
                     UITheme.SetFill(UI.SubPillCards[p], UITheme.Colors.SurfaceRaised)
@@ -1719,17 +1692,17 @@ local function RefreshUI()
 
             if sel then
                 UITheme.SetFill(UI.RowCards[r], UITheme.Colors.SurfaceSelected)
-                UITheme.SetOutlineColor(UI.RowCards[r], UITheme.Colors.Gold, 1.5)
+                UITheme.SetOutlineColor(UI.RowCards[r], UITheme.Colors.Gold, 1.8)
                 UITheme.SetFill(UI.RowBars[r], tabAccent)
                 UITheme.SetTextColor(UI.RowNames[r], UITheme.Colors.TextPrimary)
             elseif item.IsEquipped then
                 UITheme.SetFill(UI.RowCards[r], UITheme.Colors.SurfaceEquipped)
-                UITheme.SetOutlineColor(UI.RowCards[r], UITheme.Colors.HairlineSubtle, 1.0)
+                UITheme.SetOutlineColor(UI.RowCards[r], UITheme.Colors.EmeraldSoft, 1.1)
                 UITheme.SetFill(UI.RowBars[r], UITheme.Colors.Emerald)
                 UITheme.SetTextColor(UI.RowNames[r], UITheme.Colors.TextPrimary)
             elseif item.HasConflict then
                 UITheme.SetFill(UI.RowCards[r], UITheme.Colors.SurfaceConflict)
-                UITheme.SetOutlineColor(UI.RowCards[r], UITheme.Colors.HairlineSubtle, 1.0)
+                UITheme.SetOutlineColor(UI.RowCards[r], UITheme.Colors.AmberSoft, 1.0)
                 UITheme.SetFill(UI.RowBars[r], UITheme.Colors.Amber)
                 UITheme.SetTextColor(UI.RowNames[r], UITheme.Colors.TextSecondary)
             else
@@ -1808,14 +1781,26 @@ local function RefreshUI()
         UITheme.SetText(UI.DetailPillText, UITheme.Truncate(cur.Tag or tabDef.Title, 18))
         UITheme.SetText(UI.DetailTitle, UITheme.Truncate(cur.Name or "", 44))
         UITheme.SetText(UI.DetailMeta, UITheme.Truncate(cur.Meta or "", 68))
-        UITheme.SetText(UI.DetailDesc, UITheme.Truncate(cur.Description or "", 135))
-        UITheme.SetFill(UI.EquipCard, UITheme.Colors.Gold)
-        UITheme.SetText(UI.EquipText, cur.ActionLabel or "EQUIP  [A]")
+        UITheme.SetText(UI.DetailDesc, UITheme.Truncate(cur.Description or "", 148))
+        local actionLbl = cur.ActionLabel or "EQUIP  [A]"
+        if actionLbl == "EQUIPPED" then
+            UITheme.SetFill(UI.EquipCard, UITheme.Colors.EmeraldSoft)
+            UITheme.SetOutlineColor(UI.EquipCard, UITheme.Colors.Emerald, 1.2)
+            UITheme.SetTextColor(UI.EquipText, UITheme.Colors.Emerald)
+        else
+            UITheme.SetFill(UI.EquipCard, UITheme.Colors.Gold)
+            UITheme.SetOutlineColor(UI.EquipCard, UITheme.Colors.TextDark, 1.2)
+            UITheme.SetTextColor(UI.EquipText, UITheme.Colors.TextDark)
+        end
+        UITheme.SetText(UI.EquipText, actionLbl)
     else
         UITheme.SetText(UI.DetailPillText, tabDef.Title)
         UITheme.SetText(UI.DetailMeta, "")
         UITheme.SetText(UI.DetailTitle, "No Items")
         UITheme.SetText(UI.DetailDesc, "Waiting for game catalogs to load.")
+        UITheme.SetFill(UI.EquipCard, UITheme.Colors.Gold)
+        UITheme.SetOutlineColor(UI.EquipCard, UITheme.Colors.TextDark, 1.2)
+        UITheme.SetTextColor(UI.EquipText, UITheme.Colors.TextDark)
         UITheme.SetText(UI.EquipText, "EQUIP  [A]")
     end
 
@@ -1826,6 +1811,10 @@ local function RefreshUI()
             if State.IsOpen then RefreshUI() end
         end, true)
     end
+end
+
+function P2Menu.Refresh()
+    if State.IsOpen then RefreshUI() end
 end
 
 -- ============================================================================
@@ -2030,6 +2019,7 @@ function P2Menu.Close(immediate)
     local menuCfg = Config.P2Menu or {}
     State.IsOpen = false
     State.IsLimitedMatchMode = false
+    IconWarmupQueued = false
     UITheme.PlayUISound("Close", menuCfg.EnableMenuAudio ~= false)
 
     local p2 = SessionManager.GetP2()
@@ -2140,7 +2130,11 @@ function P2Menu.ActivateSelected()
 end
 
 function P2Menu.OnWorldChanged()
-    if State.IsOpen then P2Menu.Close(true) end
+    if State.IsOpen or State.IsClosing then P2Menu.Close(true) end
+    State.IsClosing = false
+    State.PausedGameForMenu = false
+    State.PausedSongComps = {}
+    IconWarmupQueued = false
     P2Menu.DestroyWidget()
 end
 
@@ -2235,7 +2229,7 @@ function P2Menu.TickInput(now)
         end
     end)
 
-    -- Strictly P2's own PlayerController hardware state (ZERO P1 gamepad polling!)
+    -- Poll P2's PlayerController exclusively.
     local toggleKey = inCfg.GamepadMenuToggleKey or "Gamepad_Special_Left"
     if KeyEdge(p2, "P2", "Gamepad_FaceButton_Right", now, false)
         or KeyEdge(p2, "P2", toggleKey, now, false) then
@@ -2286,8 +2280,8 @@ function P2Menu.TickInput(now)
     -- Optional keyboard fallback ONLY when explicitly enabled (OFF by default -> zero P1 bleed)
     if menuCfg.AllowKeyboardNavigation == true and p1 then
         if KeyEdge(p1, "KB", "BackSpace", now, false) then P2Menu.Close(false); return end
-        if KeyEdge(p1, "KB", "PageUp", now, false) then P2Menu.SelectTab(State.TabIndex - 1); return end
-        if KeyEdge(p1, "KB", "PageDown", now, false) then P2Menu.SelectTab(State.TabIndex + 1); return end
+        if KeyEdge(p1, "KB", "PageUp", now, false) then P2Menu.StepTab(-1); return end
+        if KeyEdge(p1, "KB", "PageDown", now, false) then P2Menu.StepTab(1); return end
         if KeyEdge(p1, "KB", "Up", now, true) then P2Menu.MoveCursor(-1); return end
         if KeyEdge(p1, "KB", "Down", now, true) then P2Menu.MoveCursor(1); return end
         if KeyEdge(p1, "KB", "Left", now, true) then P2Menu.ChangeSub(-1); return end

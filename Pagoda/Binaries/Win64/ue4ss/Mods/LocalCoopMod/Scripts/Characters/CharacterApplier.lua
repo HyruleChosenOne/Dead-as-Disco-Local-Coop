@@ -1,12 +1,7 @@
--- ============================================================================
--- CHARACTER APPLIER (VANILLA + CSM MODS, VISUAL STACK, STENCILS & TINTING)
--- ============================================================================
--- Discovers Vanilla Charlie + CSM (.utoc/.pak/info.json) characters and
--- applies visuals strictly to Player 2's Pawn (refusing any P1 alias).
--- Uses ONLY K2_GetComponentsByClass (never out-TArray {} calls), disables
--- CSM PostProcessAnimBP before reverting skeletons (never CreateInvalidObject),
--- and relies on event-driven OnCosmeticsApplied + a single coalesced verify.
--- ============================================================================
+-- Discovers Vanilla Charlie, CSM (.utoc/.pak), and optional experimental models,
+-- and applies mesh, material, PostProcessAnimBP, and tint state to P2's pawn only.
+-- Always disables any CSM PostProcessAnimBP before swapping skeletons back to Charlie
+-- to avoid skeleton mismatch crashes.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -40,6 +35,8 @@ local LastAppliedKey = nil
 local LastAppliedPawnKey = nil
 local LastAttachmentsHiddenPawnKey = nil
 local LastAttachmentsHiddenState = nil
+local LoadRetryCounts = {}
+local MAX_ASSET_LOAD_RETRIES = 4
 
 -- Verified SKEL_Humanoid boss & enemy meshes from Pagoda-Windows.utoc (crash-checked by GetSkeleton)
 local EXPERIMENTAL_IN_GAME_MODELS = {
@@ -90,6 +87,13 @@ function CharacterApplier.Init(config, callbacks)
     local charCfg = Config.Characters or {}
     CharacterApplier.CurrentTintMode = charCfg.TintMode or "AccentOnly"
     CharacterApplier.CurrentTintPaletteIdx = 1
+end
+
+function CharacterApplier.OnWorldChanged()
+    LastAppliedPawnKey = nil
+    LastAttachmentsHiddenPawnKey = nil
+    LastAttachmentsHiddenState = nil
+    LoadRetryCounts = {}
 end
 
 function CharacterApplier.IsExperimentalEnabled()
@@ -168,21 +172,6 @@ local function IsNonCharacterMesh(meshName, fullPath)
         return true
     end
     return false
-end
-
-local function IsWeaponOrDrumstickComponent(comp)
-    if not UObjectUtils.IsValid(comp) then return false end
-    local compName, meshName = "", ""
-    pcall(function() compName = comp:GetFName():ToString():lower() end)
-    pcall(function()
-        local m = CharacterApplier.GetMeshAsset(comp)
-        if UObjectUtils.IsValid(m) then meshName = m:GetFName():ToString():lower() end
-    end)
-    return compName:find("drumstick", 1, true) ~= nil
-        or compName:find("weapon", 1, true) ~= nil
-        or meshName:find("drumstick", 1, true) ~= nil
-        or meshName:find("stick", 1, true) ~= nil
-        or meshName:find("weapon", 1, true) ~= nil
 end
 
 function CharacterApplier.CacheOriginalP2Visuals(p2Pawn)
@@ -317,20 +306,31 @@ function CharacterApplier.SetModularAttachmentsHidden(p2Pawn, hide)
     local shouldHide = (hide == true)
     pcall(function()
         local rootMesh = p2Pawn.Mesh
-        local function applyHideState(comp)
-            if not UObjectUtils.IsValid(comp) or UObjectUtils.Same(comp, rootMesh) then return end
-            if not ShouldKeepAttachedObjectVisible(comp) then
-                pcall(function() comp:SetHiddenInGame(shouldHide, true) end)
-                pcall(function() comp:SetVisibility(not shouldHide, true) end)
-            end
-        end
-
         if not UObjectUtils.IsValid(CachedSKMClass) then
             pcall(function() CachedSKMClass = StaticFindObject("/Script/Engine.SkeletalMeshComponent") end)
         end
         if not UObjectUtils.IsValid(CachedSMClass) then
             pcall(function() CachedSMClass = StaticFindObject("/Script/Engine.StaticMeshComponent") end)
         end
+
+        local function isMeshComp(comp)
+            local okM, isM = pcall(function()
+                return (UObjectUtils.IsValid(CachedSKMClass) and comp:IsA(CachedSKMClass))
+                    or (UObjectUtils.IsValid(CachedSMClass) and comp:IsA(CachedSMClass))
+            end)
+            return okM and isM == true
+        end
+
+        local function applyHideState(comp)
+            if not UObjectUtils.IsValid(comp) or UObjectUtils.Same(comp, rootMesh) then return end
+            if not isMeshComp(comp) then return end
+            if not ShouldKeepAttachedObjectVisible(comp) then
+                -- Do NOT propagate to children so attached WidgetComponents / Niagara senses stay visible
+                pcall(function() comp:SetHiddenInGame(shouldHide, false) end)
+                pcall(function() comp:SetVisibility(not shouldHide, false) end)
+            end
+        end
+
         for _, compClass in ipairs({ CachedSKMClass, CachedSMClass }) do
             if UObjectUtils.IsValid(compClass) then
                 local comps = p2Pawn:K2_GetComponentsByClass(compClass)
@@ -351,6 +351,16 @@ function CharacterApplier.SetModularAttachmentsHidden(p2Pawn, hide)
                 end
             end
         end
+
+        -- Guarantee Player 2's Dodge/Evade Warning widget & Charlie Sense VFX remain unhidden
+        for _, keepProp in ipairs({ "DangerIndicatorWidget", "InteractionIndicatorWidget", "RedCharlieSense", "YellowCharlieSense" }) do
+            local kc = nil
+            pcall(function() kc = p2Pawn[keepProp] end)
+            if UObjectUtils.IsValid(kc) then
+                pcall(function() kc:SetHiddenInGame(false, false) end)
+            end
+        end
+
         LastAttachmentsHiddenPawnKey = UObjectUtils.GetKey(p2Pawn)
         LastAttachmentsHiddenState = shouldHide
     end)
@@ -510,9 +520,9 @@ end
 function CharacterApplier.ScanAll()
     CharacterApplier.List = {}
     CharacterApplier.ByKey = {}
+    LoadRetryCounts = {}
 
     local seenKeys, seenMeshAddrs = {}, {}
-    local charCfg = Config.Characters or {}
 
     pcall(function()
         SessionManager.RefreshControllers()
@@ -541,7 +551,7 @@ function CharacterApplier.ScanAll()
         IsModded = false,
     }, { "default", "charlie" })
 
-    local okPak, pakChars = pcall(PakScanner.ScanCharacterMods, charCfg.ShowTemplateModCharacters == true)
+    local okPak, pakChars = pcall(PakScanner.ScanCharacterMods, false)
     if okPak and type(pakChars) == "table" then
         for _, pc in ipairs(pakChars) do
             local key = "csm:" .. tostring(pc.Name)
@@ -653,51 +663,12 @@ function CharacterApplier.ScanAll()
         }, { exp.Name })
     end
 
-    if charCfg.ScanLiveSceneCharacters == true then
-        pcall(function()
-            local chars = FindAllOf("Character")
-            if not chars then return end
-            for _, ch in pairs(chars) do
-                if UObjectUtils.IsLive(ch) and UObjectUtils.IsValid(ch.Mesh) then
-                    local m = CharacterApplier.GetMeshAsset(ch.Mesh)
-                    local mKey = UObjectUtils.GetKey(m)
-                    if UObjectUtils.IsValid(m) and mKey and not seenMeshAddrs[mKey] then
-                        local meshName, fullPath = "", ""
-                        pcall(function() meshName = m:GetFName():ToString() end)
-                        pcall(function() fullPath = m:GetFullName() end)
-                        if meshName ~= "" and not IsNonCharacterMesh(meshName, fullPath) then
-                            seenMeshAddrs[mKey] = true
-                            local clean = FormatCleanName(meshName)
-                            RegisterEntry({
-                                Key = "scene:" .. meshName,
-                                Name = clean,
-                                ShortName = clean:sub(1, 14),
-                                Source = "Vanilla",
-                                Badge = "SCENE",
-                                Container = "Live World",
-                                Description = string.format("Live character mesh '%s' discovered in the scene.", meshName),
-                                Mesh = m,
-                                IsDefault = false,
-                                IsModded = false,
-                            }, { meshName })
-                        end
-                    end
-                end
-            end
-        end)
-    end
-
     return CharacterApplier.List
 end
 
 function CharacterApplier.FindEntry(key)
     if not key or key == "" then return CharacterApplier.ByKey["Default"] end
     return CharacterApplier.ByKey[key] or CharacterApplier.ByKey[UObjectUtils.NormalizeId(key)]
-end
-
-function CharacterApplier.GetActiveP2Entry()
-    local key = ProfileStore.GetP2().CharacterKey or "Default"
-    return CharacterApplier.FindEntry(key) or CharacterApplier.ByKey["Default"]
 end
 
 function CharacterApplier.ResolveAssets(entry)
@@ -803,15 +774,24 @@ function CharacterApplier.ApplyToP2(p1Ctrl, p2Ctrl, p2Pawn, charKey)
 
     local now = os.clock()
     if charKey ~= nil and LastAppliedKey ~= wantedKey and (now - LastSwitchAt) < 0.40 then
+        local pendingEntry = (wantedKey == "Default" or wantedKey == "")
+            and CharacterApplier.ByKey["Default"]
+            or CharacterApplier.FindEntry(wantedKey)
+        if pendingEntry then
+            p2Store.CharacterKey = pendingEntry.Key
+        end
         Scheduler.ReplaceDelay(320, "CharacterApplier.DeferredSwitch", function()
             if not SessionManager.IsSafeForGameplayHooks() then return end
             SessionManager.RefreshControllers()
             local c1, c2, pawn2 = SessionManager.GetP1(), SessionManager.GetP2(), SessionManager.GetP2Pawn()
             if c2 and pawn2 then
                 CharacterApplier.ApplyToP2(c1, c2, pawn2, wantedKey)
+                if Callbacks.OnCharacterApplied then
+                    UObjectUtils.SafeCall("CharacterApplier.DeferredApplied", Callbacks.OnCharacterApplied)
+                end
             end
         end, true)
-        return true, CharacterApplier.FindEntry(wantedKey)
+        return true, pendingEntry
     end
     LastSwitchAt = now
 
@@ -823,7 +803,7 @@ function CharacterApplier.ApplyToP2(p1Ctrl, p2Ctrl, p2Pawn, charKey)
         pcall(function()
             local mc = p2Pawn.Mesh
             if UObjectUtils.IsValid(mc) and UObjectUtils.IsValid(OriginalP2Mesh) then
-                -- CRITICAL: Disable CSM PostProcessAnimBP BEFORE swapping skeleton back to Charlie!
+                -- Disable CSM PostProcessAnimBP before swapping skeleton back to Charlie.
                 pcall(function() mc:SetDisablePostProcessBlueprint(true) end)
                 local cur = CharacterApplier.GetMeshAsset(mc)
                 if not UObjectUtils.Same(cur, OriginalP2Mesh) then
@@ -881,18 +861,27 @@ function CharacterApplier.ApplyToP2(p1Ctrl, p2Ctrl, p2Pawn, charKey)
 
     CharacterApplier.ResolveAssets(entry)
     if not (UObjectUtils.IsValid(entry.Mesh) or UObjectUtils.IsValid(entry.Def)) then
-        Logger.Warn("CharacterApplier", "Model '%s' assets still streaming -> scheduling retry.", tostring(entry.Name))
-        p2Store.CharacterKey = entry.Key
-        Scheduler.ReplaceDelay(450, "CharacterApplier.RetryCSMLoad", function()
-            if not SessionManager.IsSafeForGameplayHooks() then return end
-            SessionManager.RefreshControllers()
-            local c1, c2, pawn2 = SessionManager.GetP1(), SessionManager.GetP2(), SessionManager.GetP2Pawn()
-            if c2 and pawn2 and ProfileStore.GetP2().CharacterKey == entry.Key then
-                CharacterApplier.ApplyToP2(c1, c2, pawn2, entry.Key)
-            end
-        end, true)
+        local retries = (LoadRetryCounts[entry.Key] or 0) + 1
+        LoadRetryCounts[entry.Key] = retries
+        if retries <= MAX_ASSET_LOAD_RETRIES then
+            Logger.Warn("CharacterApplier", "Model '%s' assets still streaming (attempt %d/%d); retrying.",
+                tostring(entry.Name), retries, MAX_ASSET_LOAD_RETRIES)
+            p2Store.CharacterKey = entry.Key
+            Scheduler.ReplaceDelay(450, "CharacterApplier.RetryCSMLoad", function()
+                if not SessionManager.IsSafeForGameplayHooks() then return end
+                SessionManager.RefreshControllers()
+                local c1, c2, pawn2 = SessionManager.GetP1(), SessionManager.GetP2(), SessionManager.GetP2Pawn()
+                if c2 and pawn2 and ProfileStore.GetP2().CharacterKey == entry.Key then
+                    CharacterApplier.ApplyToP2(c1, c2, pawn2, entry.Key)
+                end
+            end, true)
+        else
+            Logger.Warn("CharacterApplier", "Giving up on '%s' after %d failed asset loads.",
+                tostring(entry.Name), MAX_ASSET_LOAD_RETRIES)
+        end
         return false, entry
     end
+    LoadRetryCounts[entry.Key] = nil
 
     if UObjectUtils.IsValid(entry.Mesh) and not IsSkeletonCompatibleWithCharlie(entry.Mesh, entry) then
         Logger.Warn("CharacterApplier", "Refused incompatible skeleton on '%s' to prevent crash.", tostring(entry.Name))
@@ -995,19 +984,6 @@ function CharacterApplier.TickWatchdog()
     end
 
     CharacterApplier.ReassertMeshOnly(p2Pawn)
-end
-
-function CharacterApplier.GetCSMSummary()
-    local vanillaCount, csmCount, csmNames = 0, 0, {}
-    for _, e in ipairs(CharacterApplier.List) do
-        if e.Source == "CSM" then
-            csmCount = csmCount + 1
-            csmNames[#csmNames + 1] = e.Name
-        else
-            vanillaCount = vanillaCount + 1
-        end
-    end
-    return vanillaCount, csmCount, csmNames
 end
 
 return CharacterApplier

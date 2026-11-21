@@ -1,6 +1,4 @@
--- ============================================================================
--- PURE LUA JSON SERIALIZER / DESERIALIZER & DETERMINISTIC FILE I/O
--- ============================================================================
+-- Minimal Lua JSON encoder/decoder and file helpers.
 
 local Logger = require("Utils.Logger")
 
@@ -10,6 +8,8 @@ local function EscapeString(s)
     s = tostring(s or "")
     s = s:gsub("\\", "\\\\")
     s = s:gsub('"', '\\"')
+    s = s:gsub("\b", "\\b")
+    s = s:gsub("\f", "\\f")
     s = s:gsub("\n", "\\n")
     s = s:gsub("\r", "\\r")
     s = s:gsub("\t", "\\t")
@@ -91,10 +91,22 @@ function Json.Decode(str)
                 return table.concat(out)
             elseif ch == "\\" then
                 pos = pos + 1
+                if pos > len then error("unterminated escape sequence") end
                 local esc = str:sub(pos, pos)
                 if esc == "n" then out[#out + 1] = "\n"
                 elseif esc == "r" then out[#out + 1] = "\r"
                 elseif esc == "t" then out[#out + 1] = "\t"
+                elseif esc == "b" then out[#out + 1] = "\b"
+                elseif esc == "f" then out[#out + 1] = "\f"
+                elseif esc == "u" then
+                    local hex = str:sub(pos + 1, pos + 4)
+                    local cp = (#hex == 4) and tonumber(hex, 16) or nil
+                    if cp then
+                        out[#out + 1] = (utf8 and utf8.char) and utf8.char(cp) or (cp < 128 and string.char(cp) or "?")
+                        pos = pos + 4
+                    else
+                        out[#out + 1] = "u"
+                    end
                 else out[#out + 1] = esc end
                 pos = pos + 1
             else
@@ -137,12 +149,12 @@ function Json.Decode(str)
                 pos = pos + 1
             elseif ch == "]" then
                 pos = pos + 1
-                break
+                return arr
             else
                 error("expected ',' or ']' in array near pos " .. tostring(pos))
             end
         end
-        return arr
+        error("unterminated array")
     end
 
     local function parseObject()
@@ -160,7 +172,10 @@ function Json.Decode(str)
             end
             local key = parseString()
             skipWS()
-            if str:sub(pos, pos) == ":" then pos = pos + 1 end
+            if str:sub(pos, pos) ~= ":" then
+                error("expected ':' after key near pos " .. tostring(pos))
+            end
+            pos = pos + 1
             skipWS()
             obj[key] = parseValue()
             skipWS()
@@ -169,12 +184,12 @@ function Json.Decode(str)
                 pos = pos + 1
             elseif ch == "}" then
                 pos = pos + 1
-                break
+                return obj
             else
                 error("expected ',' or '}' in object near pos " .. tostring(pos))
             end
         end
-        return obj
+        error("unterminated object")
     end
 
     parseValue = function()
@@ -223,8 +238,12 @@ function Json.WriteFile(path, tbl)
         Logger.Warn("Json", "Failed to open '%s' for writing: %s", path, tostring(openErr))
         return false, openErr
     end
-    f:write(encoded)
+    local okW, writeErr = f:write(encoded)
     f:close()
+    if not okW then
+        Logger.Warn("Json", "Failed to write '%s': %s", path, tostring(writeErr))
+        return false, writeErr
+    end
     return true, path
 end
 

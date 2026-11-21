@@ -1,13 +1,5 @@
--- ============================================================================
--- SHARED / ARENA SCREEN PLAYER FLOOR CIRCLES (P1 = CYAN, P2 = PINK)
--- ============================================================================
--- Spawns compact, collision-free horizontal ground circles beneath Player 1
--- (Cyan) and Player 2 (Hot Pink) while in Shared/Arena Screen active combat.
--- Auto-hides in Split-Screen, Dive Bar, Cutscenes, Pause, Song Select/Menus,
--- and while a player is Downed (letting ReviveOverlay own the floor ring).
--- Uses flat World-Space UWidgetComponent with native counterRing_inner texture
--- for 100% exact color accuracy, with StaticMeshActor ring fallback.
--- ============================================================================
+-- Ground rings beneath P1 (cyan) and P2 (pink) in Shared/Arena camera combat.
+-- Uses a world-space UWidgetComponent with a StaticMeshActor ring fallback.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -29,14 +21,15 @@ local DEFAULT_P1_COLOR = { R = 0.00, G = 0.94, B = 1.00, A = 0.92 } -- Cyan
 local DEFAULT_P2_COLOR = { R = 1.00, G = 0.14, B = 0.62, A = 0.92 } -- Hot Pink
 
 local Markers = {
-    [0] = { Actor = nil, WidgetComp = nil, Widget = nil, WorldKey = nil, Visible = false, Yaw = 0.0, MeshRadius = 50.0, IsFallbackMesh = false },
-    [1] = { Actor = nil, WidgetComp = nil, Widget = nil, WorldKey = nil, Visible = false, Yaw = 0.0, MeshRadius = 50.0, IsFallbackMesh = false },
+    [0] = { Actor = nil, WidgetComp = nil, Widget = nil, WorldKey = nil, Visible = false, Yaw = 0.0, MeshRadius = 50.0, IsFallbackMesh = false, LastScale = nil },
+    [1] = { Actor = nil, WidgetComp = nil, Widget = nil, WorldKey = nil, Visible = false, Yaw = 0.0, MeshRadius = 50.0, IsFallbackMesh = false, LastScale = nil },
 }
 
 local CachedMesh = nil
 local CachedMat = nil
 local CachedSMClass = nil
 local CachedWCClass = nil
+local CachedMatFNames = {}
 
 function PlayerMarkers.Init(config, callbacks)
     Config = config or {}
@@ -46,11 +39,12 @@ function PlayerMarkers.Init(config, callbacks)
 end
 
 local function LoadCached(path, cur)
-    if cur ~= nil then
-        return UObjectUtils.IsValid(cur) and cur or nil
+    if cur == false then return false end
+    if cur ~= nil and UObjectUtils.IsValid(cur) then
+        return cur
     end
     local obj = UObjectUtils.LoadObject(path)
-    return UObjectUtils.IsValid(obj) and obj or nil
+    return UObjectUtils.IsValid(obj) and obj or false
 end
 
 local function DestroyMarker(pid)
@@ -65,6 +59,7 @@ local function DestroyMarker(pid)
     m.WorldKey = nil
     m.Visible = false
     m.IsFallbackMesh = false
+    m.LastScale = nil
 end
 
 function PlayerMarkers.Destroy()
@@ -218,15 +213,15 @@ local function SpawnMarkerActor(pid, world, loc, color, sizeUU)
                 m.WorldKey = UObjectUtils.GetKey(world)
                 m.Visible = true
                 m.IsFallbackMesh = false
+                m.LastScale = scaleFactor
                 Logger.Debug("PlayerMarkers", "Spawned P%d World Widget circle (size=%.0f UU).", pid + 1, sizeUU)
                 return true
             end
         end
     end
 
-    -- Fallback: Native FX Ring StaticMesh tinted Cyan / Pink
-    if CachedMesh == nil then CachedMesh = LoadCached(RING_MESH_PATH, nil) or false end
-    if CachedMat == nil then CachedMat = LoadCached(RING_MAT_PATH, nil) or false end
+    CachedMesh = LoadCached(RING_MESH_PATH, CachedMesh)
+    CachedMat = LoadCached(RING_MAT_PATH, CachedMat)
     if UObjectUtils.IsValid(smComp) and UObjectUtils.IsValid(CachedMesh) then
         pcall(function() smComp:SetStaticMesh(CachedMesh) end)
         pcall(function()
@@ -241,7 +236,12 @@ local function SpawnMarkerActor(pid, world, loc, color, sizeUU)
             pcall(function() mid = smComp:CreateDynamicMaterialInstance(0, CachedMat) end)
             if UObjectUtils.IsValid(mid) then
                 for _, pname in ipairs(MAT_COLOR_PARAMS) do
-                    pcall(function() mid:SetVectorParameterValue(FName(pname), color) end)
+                    local fn = CachedMatFNames[pname]
+                    if not fn then
+                        fn = FName(pname)
+                        CachedMatFNames[pname] = fn
+                    end
+                    pcall(function() mid:SetVectorParameterValue(fn, color) end)
                 end
             else
                 pcall(function() smComp:SetMaterial(0, CachedMat) end)
@@ -251,6 +251,7 @@ local function SpawnMarkerActor(pid, world, loc, color, sizeUU)
         m.WorldKey = UObjectUtils.GetKey(world)
         m.Visible = true
         m.IsFallbackMesh = true
+        m.LastScale = nil
         Logger.Debug("PlayerMarkers", "Spawned P%d Fallback Mesh circle (size=%.0f UU).", pid + 1, sizeUU)
         return true
     end
@@ -296,10 +297,16 @@ local function UpdateMarkerForPlayer(pid, world, wKey, pawn, color, sizeUU, dt)
         m.Actor:K2_SetActorLocationAndRotation(floorLoc, { Pitch = 0.0, Yaw = m.Yaw, Roll = 0.0 }, false, {}, false)
         if m.IsFallbackMesh then
             local s = (sizeUU * 0.5) / math.max(10.0, m.MeshRadius or 50.0)
-            m.Actor:SetActorScale3D({ X = s, Y = s, Z = 1.0 })
+            if m.LastScale ~= s then
+                m.LastScale = s
+                m.Actor:SetActorScale3D({ X = s, Y = s, Z = 1.0 })
+            end
         elseif UObjectUtils.IsValid(m.WidgetComp) then
             local sf = math.max(0.20, sizeUU / 256.0)
-            m.WidgetComp:SetWorldScale3D({ X = sf, Y = sf, Z = sf })
+            if m.LastScale ~= sf then
+                m.LastScale = sf
+                m.WidgetComp:SetWorldScale3D({ X = sf, Y = sf, Z = sf })
+            end
         end
     end)
 end

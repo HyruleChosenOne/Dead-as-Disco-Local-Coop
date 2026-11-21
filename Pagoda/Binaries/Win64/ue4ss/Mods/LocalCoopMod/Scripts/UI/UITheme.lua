@@ -1,6 +1,4 @@
--- ============================================================================
--- UI THEME, NATIVE UE5 ROUNDED-BOX BUILDERS, HITCH-FREE ICONS & AUDIO
--- ============================================================================
+-- Shared UI palette, native UMG widget builders, budgeted icon loading, and UI audio cues.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -23,8 +21,6 @@ UITheme.NativeTextures = {
     Checkmark      = "/Game/Pagoda/UI/Art/Cosmetics/checkmark.checkmark",
     CounterRing    = "/Game/Pagoda/UI/Art/HUD/counterRing_inner.counterRing_inner",
     CounterRingMMS = "/Game/Pagoda/UI/Art/HUD/counterRing_inner_mms.counterRing_inner_mms",
-    TargeterMain   = "/Game/Pagoda/UI/Art/HUD/targeter_main.targeter_main",
-    TargeterShard  = "/Game/Pagoda/UI/Art/HUD/targeter_shard.targeter_shard",
     BeatBg         = "/Game/Pagoda/UI/Art/HUD/beatIndicatorA_bg.beatIndicatorA_bg",
     HeartFull      = "/Game/Pagoda/UI/Art/HUD/Heart_full.Heart_full",
     TabChar        = "/Game/Pagoda/UI/Art/Cosmetics/icon_jacket.icon_jacket",
@@ -628,8 +624,9 @@ end
 local NativeTexCache = {}
 function UITheme.GetNativeTexture(key)
     local cached = NativeTexCache[key]
-    if cached ~= nil then
-        return UObjectUtils.IsValid(cached) and cached or nil
+    if cached == false then return nil end
+    if cached ~= nil and UObjectUtils.IsValid(cached) then
+        return cached
     end
     local path = UITheme.NativeTextures[key]
     if not path then return nil end
@@ -743,7 +740,8 @@ local function TryPlayFMODEvent(kind, world)
 
     local ev = CachedFMODEvents[kind]
     if ev == false then return false end
-    if ev == nil then
+    if not UObjectUtils.IsValid(ev) then
+        ev = nil
         local path = FMOD_EVENT_PATHS[kind]
         if not path then
             CachedFMODEvents[kind] = false
@@ -818,6 +816,12 @@ function UITheme.PlayUISound(kind, enabled)
         local pitch = SOUND_PITCH[kind] or 1.0
         gs:PlaySound2D(world, snd, vol, pitch, 0.0, nil, nil, true)
     end)
+end
+
+function UITheme.OnWorldChanged()
+    IconFailCount = {}
+    CachedUISounds = nil
+    LastUISoundScan = 0.0
 end
 
 return UITheme

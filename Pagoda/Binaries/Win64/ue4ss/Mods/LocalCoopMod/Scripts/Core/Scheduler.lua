@@ -1,13 +1,5 @@
--- ============================================================================
--- SINGLE-THREADED GAME-THREAD SCHEDULER (ZERO ASYNC-THREAD RACES)
--- ============================================================================
--- Lua 5.4 is strictly single-threaded per lua_State*.
--- Uses ONE permanently-rooted EngineTick loop (LoopInGameThreadAfterFrames)
--- running synchronously on the Unreal Game Thread at UEngine::Tick.
--- Supports per-frame callbacks (OnFrame), next-tick coalesced defers,
--- generation-scoped delays (automatically cancelled on world change/despawn),
--- and throttled repeating intervals.
--- ============================================================================
+-- Game-thread task scheduler backed by a single LoopInGameThreadAfterFrames loop.
+-- Generation-bound delays and defers are discarded on world transitions or P2 despawn.
 
 local Logger = require("Utils.Logger")
 
@@ -26,10 +18,6 @@ local LastTickAt = 0.0
 local LastFrameAt = 0.0
 local TickHandle = nil
 local HeartbeatMode = "NotStarted"
-
-function Scheduler.GetGeneration()
-    return CurrentGeneration
-end
 
 function Scheduler.BumpGeneration(reason)
     CurrentGeneration = CurrentGeneration + 1
@@ -95,7 +83,11 @@ function Scheduler.Cancel(taskId)
     end
     for i = #Intervals, 1, -1 do
         if Intervals[i].Id == taskId then
-            table.remove(Intervals, i)
+            local copy = {}
+            for j = 1, #Intervals do
+                if j ~= i then copy[#copy + 1] = Intervals[j] end
+            end
+            Intervals = copy
             return
         end
     end
@@ -106,13 +98,16 @@ function Scheduler.Every(intervalMs, tag, fn)
     local id = NextTaskId
     NextTaskId = NextTaskId + 1
     local sec = math.max(0.025, (tonumber(intervalMs) or 100) / 1000.0)
-    Intervals[#Intervals + 1] = {
+    local copy = {}
+    for i = 1, #Intervals do copy[i] = Intervals[i] end
+    copy[#copy + 1] = {
         Id = id,
         IntervalSec = sec,
         NextRun = os.clock() + sec,
         Tag = tostring(tag or "Loop"),
         Fn = fn,
     }
+    Intervals = copy
     return id
 end
 
@@ -133,27 +128,21 @@ function Scheduler.OnFrame(tag, fn)
             return
         end
     end
-    FrameCallbacks[#FrameCallbacks + 1] = { Tag = t, Fn = fn }
-end
-
-function Scheduler.RemoveOnFrame(tag)
-    local t = tostring(tag or "")
-    for i = #FrameCallbacks, 1, -1 do
-        if FrameCallbacks[i].Tag == t then
-            table.remove(FrameCallbacks, i)
-            return
-        end
-    end
+    local copy = {}
+    for i = 1, #FrameCallbacks do copy[i] = FrameCallbacks[i] end
+    copy[#copy + 1] = { Tag = t, Fn = fn }
+    FrameCallbacks = copy
 end
 
 local function ProcessTick()
     local now = os.clock()
 
-    if #FrameCallbacks > 0 then
+    local frameList = FrameCallbacks
+    if #frameList > 0 then
         local dt = (LastFrameAt > 0.0) and math.min(0.10, math.max(0.001, now - LastFrameAt)) or 0.016
         LastFrameAt = now
-        for i = 1, #FrameCallbacks do
-            local cb = FrameCallbacks[i]
+        for i = 1, #frameList do
+            local cb = frameList[i]
             if cb then
                 local ok, err = pcall(cb.Fn, dt, now)
                 if not ok then
@@ -221,8 +210,9 @@ local function ProcessTick()
         end
     end
 
-    for i = 1, #Intervals do
-        local loop = Intervals[i]
+    local intervalList = Intervals
+    for i = 1, #intervalList do
+        local loop = intervalList[i]
         if now >= loop.NextRun then
             loop.NextRun = now + loop.IntervalSec
             local ok, err = pcall(loop.Fn, now)

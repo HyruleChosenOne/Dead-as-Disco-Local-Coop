@@ -1,13 +1,7 @@
--- ============================================================================
--- VIEWPORT CONTROLLER, SPLIT-SCREEN, CUTSCENE COLLAPSE & SHARED MIDPOINT CAM
--- ============================================================================
--- * Non-destructive CommonUI PagodaUILayoutWidget scaling (never breaks
---   CommonUI ActionRouter pause/settings focus!).
--- * Excludes Settings, Remapping, Enemy Health Bars, Takedown Indicators,
---   Status Effects, and all mod-registered UI widgets.
--- * Suppresses ONLY P2's real Dive Bar currency widget (WBP_CreditsDisplay_C).
--- * Flicker-free mod-owned ACameraActor midpoint camera for Shared/Arena mode.
--- ============================================================================
+-- Manages split-screen layouts, cutscene/pause/menu fullscreen transitions,
+-- CommonUI layout scaling, custom FOV, and the shared-screen midpoint camera.
+-- Avoids RemoveFromParent/AddToPlayerScreen on PagodaUILayoutWidget to preserve
+-- CommonUI ActionRouter focus.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -34,6 +28,7 @@ local SavedOriginalUIScaleRule = nil
 local LocalizedLayoutKeys = {}
 local HiddenPauseP2Layouts = {}
 local P2PawnHiddenForP1Menu = false
+local P2HiddenPawnKey = nil
 local ModOwnedWidgets = {} -- [tag] = getterFn
 
 local SharedCamActor = nil
@@ -43,19 +38,6 @@ local SharedCamLoc = nil
 local SharedCamRot = nil
 local SharedCamOrbitYaw = nil
 local LastSetP1CtrlYaw = nil
-
-local P1_DIVEBAR_MENU_CLASSES = {
-    "WBP_Cosmetics_Main_C",
-    "WBP_SkillTree_Main_C",
-    "WBP_MoveList_Main_C",
-    "WBP_Collectibles_Main_C",
-    "WBP_Drumkit_Main_C",
-    "WBP_SongList_Main_C",
-    "WBP_SongList_JukeBox_C",
-    "WBP_InfiniteDiscoMenu_C",
-    "WBP_InfiniteDisco_ModeSelect_C",
-    "WBP_LevelSelect_Projected_Main_C",
-}
 local CachedUISettings = nil
 local CachedCamActorClass = nil
 
@@ -104,13 +86,23 @@ end
 
 function ViewportController.IsArenaCameraActive()
     if not SessionManager.IsP2Active() then return false end
-    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen or ViewportController.InP1MenuFullscreen then return false end
+    if SessionManager.State.IsInCutscene
+        or ViewportController.InCutsceneFullscreen
+        or ViewportController.InPauseFullscreen
+        or ViewportController.InP1MenuFullscreen then
+        return false
+    end
     return ViewportController.GetEffectiveScreenMode() == 2
 end
 
 function ViewportController.IsSplitScreenActive()
     if not SessionManager.IsP2Active() then return false end
-    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen or ViewportController.InP1MenuFullscreen then return false end
+    if SessionManager.State.IsInCutscene
+        or ViewportController.InCutsceneFullscreen
+        or ViewportController.InPauseFullscreen
+        or ViewportController.InP1MenuFullscreen then
+        return false
+    end
     local eff = ViewportController.GetEffectiveScreenMode()
     return (eff == 0 or eff == 1)
 end
@@ -219,79 +211,27 @@ function ViewportController.SuppressP2DiveBarCredits()
     end)
 end
 
-local function IsWidgetActivelyOpen(w)
-    if not UObjectUtils.IsLive(w) then return false end
-    local vis = 0
-    pcall(function()
-        local v = w:GetVisibility()
-        if type(v) == "number" then vis = v end
-    end)
-    if vis == 1 or vis == 2 then return false end
-    local hasAct, isAct = false, false
-    pcall(function()
-        if type(w.IsActivated) == "function" then
-            hasAct = true
-            isAct = (w:IsActivated() == true)
-        end
-    end)
-    if hasAct then return isAct end
-    local inVP = false
-    pcall(function() inVP = (type(w.IsInViewport) == "function" and w:IsInViewport() == true) end)
-    return inVP
-end
-
 local function IsAnyP1MenuCurrentlyOpen()
     if not SessionManager.IsP2Active() or not SessionManager.IsSafeForGameplayHooks() then return false end
     if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen then return false end
-
-    local menuOpen = false
-    pcall(function()
-        local layouts = FindAllOf("PagodaUILayoutWidget")
-        if layouts then
-            for _, layout in pairs(layouts) do
-                if UObjectUtils.IsLive(layout) then
-                    local own = nil
-                    pcall(function() own = layout:GetOwningPlayer() end)
-                    if SessionManager.GetPlayerIndex(own) == 0 then
-                        for _, stackName in ipairs({ "GameMenuStack", "ModalStack" }) do
-                            local st = nil
-                            pcall(function() st = layout[stackName] end)
-                            if UObjectUtils.IsValid(st) then
-                                local actW = nil
-                                pcall(function() actW = st:GetActiveWidget() end)
-                                if IsWidgetActivelyOpen(actW) then
-                                    menuOpen = true
-                                    return
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        for _, clsName in ipairs(P1_DIVEBAR_MENU_CLASSES) do
-            local list = FindAllOf(clsName)
-            if list then
-                for _, w in pairs(list) do
-                    if IsWidgetActivelyOpen(w) then
-                        menuOpen = true
-                        return
-                    end
-                end
-            end
-        end
-    end)
-    return menuOpen
+    if type(Callbacks.IsAnyNativeMenuOpen) == "function" then
+        return Callbacks.IsAnyNativeMenuOpen() == true
+    end
+    return false
 end
 
 local function SetP2PawnHiddenForP1Menu(hide)
     local p2Pawn = SessionManager.GetP2Pawn()
     if not UObjectUtils.IsLive(p2Pawn) then
         P2PawnHiddenForP1Menu = false
+        P2HiddenPawnKey = nil
         return
     end
     local shouldHide = (hide == true)
+    local pKey = UObjectUtils.GetKey(p2Pawn)
+    if shouldHide and P2PawnHiddenForP1Menu and P2HiddenPawnKey == pKey then
+        return
+    end
     pcall(function() p2Pawn:SetActorHiddenInGame(shouldHide) end)
     pcall(function()
         if UObjectUtils.IsValid(p2Pawn.Mesh) then
@@ -300,6 +240,7 @@ local function SetP2PawnHiddenForP1Menu(hide)
         end
     end)
     P2PawnHiddenForP1Menu = shouldHide
+    P2HiddenPawnKey = shouldHide and pKey or nil
     if (not shouldHide) and Callbacks.OnP2UnhiddenAfterP1Menu then
         UObjectUtils.SafeCall("Viewport.P2Unhidden", Callbacks.OnP2UnhiddenAfterP1Menu, p2Pawn)
     end
@@ -346,9 +287,6 @@ function ViewportController.SyncP1MenuP2Visibility()
     end
 end
 
--- Alias for existing hook callers
-ViewportController.SyncP1DiveBarMenuAspect = ViewportController.SyncP1MenuP2Visibility
-
 function ViewportController.RefreshLayoutLocalization(layoutWidget)
     if not UObjectUtils.IsLive(layoutWidget) then return end
 
@@ -368,8 +306,8 @@ function ViewportController.RefreshLayoutLocalization(layoutWidget)
             menuScale = hudCfg.SplitScreenMenuScale or 0.95
         end
 
-        -- NEVER call RemoveFromParent() + AddToPlayerScreen() on PagodaUILayoutWidget
-        -- (breaks CommonUI ActionRouter for Pause Menu / Settings!)
+        -- Avoid RemoveFromParent + AddToPlayerScreen on PagodaUILayoutWidget
+        -- because rehosting breaks CommonUI ActionRouter focus on Pause/Settings.
         if UObjectUtils.IsLive(layoutWidget.GameHUDStack) then
             ApplyRenderScale(layoutWidget.GameHUDStack, hudScale)
         end
@@ -551,6 +489,7 @@ function ViewportController.EnterCutsceneFullscreen(reason)
 
     CutsceneIdleChecks = 0
     SessionManager.SetCutsceneState(true)
+    ViewportController.ReleaseSharedMidpointCamera(0.05)
     if ViewportController.InCutsceneFullscreen then return end
     if ViewportController.GetEffectiveScreenMode() == 2 then
         if Callbacks.SyncHUD then UObjectUtils.SafeCall("Cutscene.SyncHUD", Callbacks.SyncHUD) end
@@ -559,7 +498,6 @@ function ViewportController.EnterCutsceneFullscreen(reason)
 
     ViewportController.SavedPreCutsceneMode = ViewportController.CurrentScreenMode
     ViewportController.InCutsceneFullscreen = true
-    ViewportController.ReleaseSharedMidpointCamera(0.05)
     Logger.Info("ViewportController", "Cutscene (%s) -> Fullscreen (saved mode=%d)",
         tostring(reason), ViewportController.SavedPreCutsceneMode)
 
@@ -568,6 +506,7 @@ end
 
 function ViewportController.ExitCutsceneFullscreen(reason)
     SessionManager.SetCutsceneState(false)
+    CutsceneIdleChecks = 0
     if not ViewportController.InCutsceneFullscreen then
         if Callbacks.SyncHUD then UObjectUtils.SafeCall("CutsceneExit.SyncHUD", Callbacks.SyncHUD) end
         return
@@ -576,16 +515,18 @@ function ViewportController.ExitCutsceneFullscreen(reason)
     local restoreMode = ViewportController.SavedPreCutsceneMode
     ViewportController.InCutsceneFullscreen = false
     ViewportController.SavedPreCutsceneMode = nil
-    CutsceneIdleChecks = 0
 
     Logger.Info("ViewportController", "Cutscene ended (%s) -> restoring mode %s", tostring(reason), tostring(restoreMode))
     SessionManager.RefreshControllers()
     local vpCfg = Config.Viewport or {}
-    if restoreMode ~= nil and SessionManager.IsP2Active() then
+    if restoreMode ~= nil and SessionManager.IsP2Active()
+        and not ViewportController.InPauseFullscreen
+        and not ViewportController.InP1MenuFullscreen then
         ViewportController.ApplyScreenMode(restoreMode, not vpCfg.ShowCutsceneSwitchNotification)
     elseif restoreMode ~= nil then
         ViewportController.CurrentScreenMode = restoreMode
         ViewportController.ApplyCustomFOV()
+        if Callbacks.SyncHUD then UObjectUtils.SafeCall("CutsceneExit.SyncHUD", Callbacks.SyncHUD) end
     end
 end
 
@@ -661,10 +602,14 @@ end
 function ViewportController.ExitPauseFullscreen()
     if not ViewportController.InPauseFullscreen then return end
     ViewportController.InPauseFullscreen = false
-    SuppressP2LayoutsForPause(false)
-    if SessionManager.IsP2Active() and not ViewportController.InCutsceneFullscreen then
-        ViewportController.ApplyScreenMode(ViewportController.CurrentScreenMode, true)
-    elseif Callbacks.SyncHUD then
+    if not ViewportController.InP1MenuFullscreen then
+        SuppressP2LayoutsForPause(false)
+        if SessionManager.IsP2Active() and not ViewportController.InCutsceneFullscreen then
+            ViewportController.ApplyScreenMode(ViewportController.CurrentScreenMode, true)
+            return
+        end
+    end
+    if Callbacks.SyncHUD then
         UObjectUtils.SafeCall("PauseExit.SyncHUD", Callbacks.SyncHUD)
     end
 end
@@ -672,6 +617,7 @@ end
 function ViewportController.ResetOnWorldRestart()
     ViewportController.ClearLocalizedCache()
     P2PawnHiddenForP1Menu = false
+    P2HiddenPawnKey = nil
     HiddenPauseP2Layouts = {}
     SharedCamActor = nil
     SharedCamWorldKey = nil
@@ -695,11 +641,33 @@ end
 -- CUSTOM CAMERA FOV & FLICKER-FREE SHARED MIDPOINT CAMERA
 -- ============================================================================
 
+function ViewportController.GetFOVModeLabel()
+    if not ViewportController.CustomFOVEnabled then
+        return "Default"
+    end
+    local cur = tonumber(ViewportController.CustomFOV) or 100.0
+    if cur >= 106.0 then
+        return "Wider"
+    end
+    return "Wide"
+end
+
+function ViewportController.GetFOVModeShortTag()
+    if not ViewportController.CustomFOVEnabled then
+        return "DEFAULT"
+    end
+    local cur = tonumber(ViewportController.CustomFOV) or 100.0
+    if cur >= 106.0 then
+        return "WIDER"
+    end
+    return "WIDE"
+end
+
 function ViewportController.ApplyCustomFOV()
     if ViewportController.InCutsceneFullscreen then return end
     pcall(function()
         SessionManager.RefreshControllers()
-        local targetFov = ViewportController.CustomFOVEnabled and (tonumber(ViewportController.CustomFOV) or 90.0) or 0.0
+        local targetFov = ViewportController.CustomFOVEnabled and (tonumber(ViewportController.CustomFOV) or 100.0) or 0.0
         for pid = 0, 1 do
             local pc = SessionManager.GetController(pid)
             if pc then pcall(function() pc:FOV(targetFov) end) end
@@ -707,31 +675,21 @@ function ViewportController.ApplyCustomFOV()
     end)
 end
 
-function ViewportController.ToggleCustomFOV()
-    ViewportController.CustomFOVEnabled = not ViewportController.CustomFOVEnabled
-    ViewportController.ApplyCustomFOV()
-    if Callbacks.SaveProfile then UObjectUtils.SafeCall("Viewport.SaveFOV", Callbacks.SaveProfile) end
-    if Callbacks.Notify then
-        Callbacks.Notify(
-            ViewportController.CustomFOVEnabled
-                and string.format("Custom Camera FOV: %d deg", math.floor(ViewportController.CustomFOV + 0.5))
-                or "Custom Camera FOV: OFF (Default)",
-            "Info"
-        )
+function ViewportController.CycleFOVPreset()
+    if not ViewportController.CustomFOVEnabled then
+        ViewportController.CustomFOVEnabled = true
+        ViewportController.CustomFOV = 100.0
+    elseif (tonumber(ViewportController.CustomFOV) or 100.0) < 106.0 then
+        ViewportController.CustomFOVEnabled = true
+        ViewportController.CustomFOV = 112.0
+    else
+        ViewportController.CustomFOVEnabled = false
+        ViewportController.CustomFOV = 90.0
     end
-end
-
-function ViewportController.AdjustCustomFOV(delta)
-    local cur = tonumber(ViewportController.CustomFOV) or 90.0
-    local nextVal = cur + (tonumber(delta) or 5.0)
-    if nextVal > 120.0 then nextVal = 70.0 end
-    if nextVal < 70.0 then nextVal = 120.0 end
-    ViewportController.CustomFOV = nextVal
-    ViewportController.CustomFOVEnabled = true
     ViewportController.ApplyCustomFOV()
     if Callbacks.SaveProfile then UObjectUtils.SafeCall("Viewport.SaveFOV", Callbacks.SaveProfile) end
     if Callbacks.Notify then
-        Callbacks.Notify(string.format("Custom Camera FOV: %d deg", math.floor(ViewportController.CustomFOV + 0.5)), "Info")
+        Callbacks.Notify("Camera FOV: " .. ViewportController.GetFOVModeLabel(), "Info")
     end
 end
 
@@ -809,7 +767,10 @@ function ViewportController.TickDynamicMidpointCamera(dt)
             SharedCamActive = false
             SharedCamLoc = nil
             SharedCamRot = nil
-            local camCls = StaticFindObject("/Script/Engine.CameraActor")
+            if not UObjectUtils.IsValid(CachedCamActorClass) then
+                CachedCamActorClass = StaticFindObject("/Script/Engine.CameraActor")
+            end
+            local camCls = CachedCamActorClass
             if not UObjectUtils.IsValid(camCls) then return end
             local initLoc = p1Pawn:K2_GetActorLocation()
             local initRot = p1:GetControlRotation()
@@ -841,8 +802,8 @@ function ViewportController.TickDynamicMidpointCamera(dt)
 
         local vpCfg = Config.Viewport or {}
         local baseArm = vpCfg.SharedCameraBaseArm or 680.0
-        local maxArm = vpCfg.SharedCameraMaxArm or 1380.0
-        local targetArm = math.min(maxArm, math.max(baseArm, baseArm + sep * 0.72))
+        local maxArm = vpCfg.SharedCameraMaxArm or 1240.0
+        local targetArm = math.min(maxArm, math.max(baseArm, baseArm + sep * 0.58))
 
         local ctrlRot = p1:GetControlRotation()
         local curP1Yaw = (ctrlRot and ctrlRot.Yaw) or (SharedCamRot and SharedCamRot.Yaw) or 0.0
@@ -857,7 +818,7 @@ function ViewportController.TickDynamicMidpointCamera(dt)
             end
         end
 
-        local targetPitch = -26.0 - math.min(14.0, sep * 0.012)
+        local targetPitch = -32.0 - math.min(10.0, sep * 0.010)
         local d2r = math.pi / 180.0
         local cy, sy = math.cos(SharedCamOrbitYaw * d2r), math.sin(SharedCamOrbitYaw * d2r)
         local cp, sp = math.cos(targetPitch * d2r), math.sin(targetPitch * d2r)
@@ -955,7 +916,7 @@ function ViewportController.IsAnyCutsceneActive()
 end
 
 function ViewportController.TickCutsceneWatchdog()
-    if not ViewportController.InCutsceneFullscreen then return end
+    if not (ViewportController.InCutsceneFullscreen or SessionManager.State.IsInCutscene) then return end
     if not UObjectUtils.IsGameplayWorld() or not SessionManager.IsP2Active() then
         ViewportController.ExitCutsceneFullscreen("WorldOrP2Changed")
     elseif not ViewportController.IsAnyCutsceneActive() then

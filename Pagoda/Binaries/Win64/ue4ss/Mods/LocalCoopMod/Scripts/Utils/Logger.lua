@@ -1,6 +1,4 @@
--- ============================================================================
--- STRUCTURED RING-BUFFERED LOGGER (ZERO SILENT FAILURES)
--- ============================================================================
+-- Ring-buffered logger for UE4SS output and in-game diagnostics.
 
 local Logger = {}
 
@@ -62,8 +60,7 @@ function Logger.Debug(tag, fmt, ...)
     end
 end
 
--- Deduplicated warning whenever an expected UObject, UFunction, or Widget is absent.
--- Prevents silent failures while avoiding per-frame log spam; reset on world transitions.
+-- Log missing UObject/UFunction/Widget once per world to avoid per-frame spam.
 function Logger.Missing(tag, assetOrFnName, context)
     local key = tostring(tag or "Core") .. "|" .. tostring(assetOrFnName or "?")
     if MissingReported[key] then return false end
@@ -95,10 +92,6 @@ function Logger.GetStats()
         MissingCount = MissingCount,
         BufferedLines = #RingBuffer,
     }
-end
-
-function Logger.ClearBuffer()
-    RingBuffer = {}
 end
 
 return Logger

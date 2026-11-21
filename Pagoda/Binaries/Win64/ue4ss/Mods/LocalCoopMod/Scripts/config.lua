@@ -1,27 +1,19 @@
--- ============================================================================
--- DEAD AS DISCO - LOCAL CO-OP MOD (v1.0 Experimental) CONFIGURATION
--- ============================================================================
--- Organized configuration for Session, Viewport/Camera, Native Vanilla HUD,
--- Input Routing, Revive State Machine, Player 2 Menu, Notifications,
--- Character/Cosmetic Styling (Vanilla + CSM), and Isolated Loadouts.
--- ============================================================================
+-- Dead as Disco - Local Co-op Mod (v1.0 Experimental) configuration
 
 local Config = {
     Logging = {
-        DebugLogging = false,   -- Verbose trace logging to UE4SS.log
-        MaxRecentLogs = 100,    -- Ring buffer size for live diagnostics
+        DebugLogging = false,
+        MaxRecentLogs = 100,
     },
 
     Session = {
-        AutoLeashEnabled = true,        -- Automatically pulls P2 near P1 if far away in Arena Camera
+        AutoLeashEnabled = true,
         MaxLeashDistance = 2500.0,
         MaxLeashZDiff = 600.0,
     },
 
     Viewport = {
-        -- 0 = Horizontal Split-Screen (Top / Bottom)
-        -- 1 = Vertical Split-Screen (Left / Right)
-        -- 2 = Arena / Shared Camera (Dynamic midpoint in combat; Dive Bar uses Split-Screen)
+        -- 0 = Horizontal Split-Screen, 1 = Vertical Split-Screen, 2 = Shared Arena Camera
         ScreenMode = 0,
         AutoFullscreenOnCutscene = true,
         CutsceneViewportMode = 2,
@@ -29,10 +21,10 @@ local Config = {
         UniversalPauseFullscreen = true,
         UseScaleToFitInSplitScreen = true,
         CustomFOVEnabled = false,
-        CustomFOV = 90.0,
+        CustomFOV = 100.0,
         EnableDynamicSharedCamera = true,
         SharedCameraBaseArm = 680.0,
-        SharedCameraMaxArm = 1380.0,
+        SharedCameraMaxArm = 1240.0,
     },
 
     HUD = {
@@ -40,34 +32,34 @@ local Config = {
         HorizontalSplitScale = 1.0,
         VerticalSplitScale = 0.92,
         SplitScreenMenuScale = 0.95,
-        SharedScreenScale = 0.78,       -- Adjustable in P2 Menu Tab 5 (0.60 .. 1.10)
-        SharedScreenAnchorX = 0.020,    -- Bottom-Left in Arena / Shared Camera (avoids P1 HUD overlap)
+        SharedScreenScale = 0.78,       -- 0.60 .. 1.10 (adjustable in P2 Menu -> Settings)
+        SharedScreenAnchorX = 0.020,
         SharedScreenAnchorY = 0.960,
-        ShowDiveBarJoinPrompt = true,   -- Shows dynamic "Connect Player 2 [F6 / L3+R3]" card in Dive Bar
+        ShowDiveBarJoinPrompt = true,
         JoinPromptAnchorX = 0.022,
         JoinPromptAnchorY = 0.952,
         ShowPlayerBadges = true,
-        ShowP1Badge = true,             -- Shows clean "PLAYER 1" tag above P1's hearts during combat in Arena mode
-        ShowP2Badge = true,             -- Sleek "PLAYER 2" arcade tag above P2's bottom-left HUD cluster
-        HideSharedHUDInMenus = true,    -- Hide P2 shared-screen HUD during Song Select / Mode Select / Menus
-        ShowSharedPlayerCircles = true, -- Compact Cyan (P1) / Pink (P2) ground circles in Shared/Arena Screen mode
-        SharedCircleSize = 118.0,       -- Diameter in Unreal Units for shared-screen player rings
-        P1CircleColor = { R = 0.00, G = 0.94, B = 1.00, A = 0.92 }, -- Cyan ring under Player 1
-        P2CircleColor = { R = 1.00, G = 0.14, B = 0.62, A = 0.92 }, -- Pink ring under Player 2
+        ShowP1Badge = true,
+        ShowP2Badge = true,
+        HideSharedHUDInMenus = true,
+        ShowSharedPlayerCircles = true,
+        SharedCircleSize = 118.0,
+        P1CircleColor = { R = 0.00, G = 0.94, B = 1.00, A = 0.92 },
+        P2CircleColor = { R = 1.00, G = 0.14, B = 0.62, A = 0.92 },
         HideP2DiveBarCredits = true,
         SharedViewportZOrder = 50,
     },
 
     Input = {
-        -- true  = 1 Keyboard/Mouse (P1) + 1 Controller (P2)
-        -- false = 2 Controllers (Controller 1 = P1, Controller 2 = P2)
+        -- true  = 1 KB/Mouse (P1) + 1 Controller (P2)
+        -- false = 2 Controllers (Pad 1 = P1, Pad 2 = P2)
         OffsetGamepad = true,
         AutoOffsetGamepadOnKeyboard = true,
         EnableGamepadShortcuts = true,
         GamepadJoinChord = { "Gamepad_LeftThumbstick", "Gamepad_RightThumbstick" },
-        GamepadJoinHoldSeconds = 0.12,  -- Requires L3+R3 held together (prevents accidental sprint+lock-on triggers)
-        EnablePauseMenuP2Gamepad = true,-- Lets P2's gamepad navigate, confirm, back & resume in Pause Menu
-        GamepadMenuToggleKey = "Gamepad_Special_Left", -- Select / View / Share
+        GamepadJoinHoldSeconds = 0.12,
+        EnablePauseMenuP2Gamepad = true,
+        GamepadMenuToggleKey = "Gamepad_Special_Left",
         GamepadChordCooldown = 0.65,
         RoutePauseMenuToPrimaryViewport = true,
         InterceptDiveBarStationsForP2 = true,
@@ -75,49 +67,45 @@ local Config = {
 
     Revive = {
         Enabled = true,
-        ReviveDuration = 0.85,              -- Fast hold duration (seconds) when pressing E/F or X/A
         ReviveHoldDuration = 0.85,
-        ReviveProximityDuration = 1.65,     -- Natural proximity assist while fighting near downed teammate (0 = hold only)
-        ReviveRadius = 210.0,               -- Compact, well-fitted combat revive radius in UU
-        ReviveCircleVisualScale = 0.64,     -- Sleek, personal-spotlight floor ring visual scale
-        ReviveCircleOpacity = 0.40,         -- Subtle neon floor spotlight opacity
-        ReviveGracePeriod = 2.5,            -- Seconds before progress gently decays after leaving radius
-        ReviveDecayRate = 0.12,             -- Gentle decay per second after grace period expires
-        ReviveHealthPercent = 0.60,         -- Restored % of MaxHealth on recovery (verified post-heal)
-        ReviveInvulnerabilityDuration = 2.5,-- Post-revive i-frames (seconds)
+        ReviveProximityDuration = 1.65,     -- Set 0 for hold-only revives
+        ReviveRadius = 260.0,
+        ReviveCircleVisualScale = 0.92,
+        ReviveCircleOpacity = 0.72,
+        ReviveGracePeriod = 2.5,
+        ReviveDecayRate = 0.12,
+        ReviveHealthPercent = 0.60,
+        ReviveInvulnerabilityDuration = 2.5,
         ReviveHoldGamepadKeys = { "Gamepad_FaceButton_Left", "Gamepad_FaceButton_Bottom" },
         ReviveHoldKeyboardKeys = { "E", "F" },
         ShowReviveUI = true,
-        ShowWorldReviveCircle = true,   -- Spawns 3D floor boundary ring + expanding inner circle around downed player
-        ShowProjectedReviveRing = true, -- Projects native circular radial progress medallion onto downed player
-        PlayReviveStandUpDance = true,  -- Downed player kips up into a disco dance upon revive (input-cancellable)
+        ShowWorldReviveCircle = true,
+        ShowProjectedReviveRing = true,
+        PlayReviveStandUpDance = true,
         EnableReviveAudioFX = true,
         RedirectEnemyAggro = true,
     },
 
     P2Menu = {
         Enabled = true,
-        RestrictToDiveBar = false,          -- Set true to lock P2 Menu to Dive Bar hub only
-        AllowKeyboardNavigation = false,    -- Keep false so P2 Menu NEVER reacts to P1 keyboard
+        RestrictToDiveBar = false,
+        AllowKeyboardNavigation = false,    -- Keep false so P2 Menu ignores P1 keyboard input
         EnableMenuAudio = true,
-        ShowMouseCursor = false,            -- Keep false so P1 mouse combat is uninterrupted
+        ShowMouseCursor = false,
         OpenTransitionDuration = 0.14,
     },
 
     Notifications = {
         Enabled = true,
-        SuppressDuringCombat = true,    -- Hides non-critical gameplay toasts (like "Player 2 Revived") during stages
-        OnlyShowJoinLeave = false,
+        SuppressDuringCombat = true,
         Duration = 2.6,
     },
 
     Experimental = {
-        Enabled = false, -- Unlocks character rim tints, playable SKEL_Humanoid boss/enemy models & diagnostics
+        Enabled = false,
     },
 
     Characters = {
-        ScanLiveSceneCharacters = false,
-        ShowTemplateModCharacters = false,
         EnableTint = true,
         TintMode = "AccentOnly",            -- "AccentOnly" | "FullBody" | "Off"
         TintColor = { R = 0.00, G = 1.00, B = 0.90, A = 1.00 },
@@ -136,9 +124,6 @@ local Config = {
     },
 
     Loadouts = {
-        ProtectP1Achievements = true,
-        UnlockAllCosmeticsForP2 = true,
-        UnlockAllSkillsForP2 = true,
         DefaultOutfitPresetIndex = 2,
         DefaultLoadoutPresetIndex = 2,
 
@@ -163,7 +148,7 @@ local Config = {
             {
                 Name = "La Pantera (Dahlia Burn)",
                 MirrorPlayer1Skills = false,
-                BossAbilities = { "VermillionDance", "Singularity", "ChainLightning", "FeverRush" },
+                BossAbilities = { "VermillionDance", "Singularity", "ChainLightning", "BlockAndRetaliate" },
                 Upgrades = {
                     "DanceMove", "Drummerang", "Sprint", "StrongAttack", "Windmill", "FeverRush",
                     "VermillionDance", "PyroetteAoeOnHit", "PyroetteDurationUp", "BurnDurationUp",
@@ -175,7 +160,7 @@ local Config = {
             {
                 Name = "Shredder Lightning",
                 MirrorPlayer1Skills = false,
-                BossAbilities = { "ChainLightning", "LightningStrike", "DropTheBaxe", "FeverRush" },
+                BossAbilities = { "ChainLightning", "LightningStrike", "DropTheBaxe", "VermillionDance" },
                 Upgrades = {
                     "DanceMove", "Drummerang", "Sprint", "StrongAttack", "Windmill", "FeverRush",
                     "ChainLightning", "ChainLightning_Upgrade01", "LightningStrike", "Drummerang_FollowUp",
@@ -186,7 +171,7 @@ local Config = {
             {
                 Name = "Rebel Heavy Baxe",
                 MirrorPlayer1Skills = false,
-                BossAbilities = { "DropTheBaxe", "BlockAndRetaliate", "ChainLightning", "FeverRush" },
+                BossAbilities = { "DropTheBaxe", "BlockAndRetaliate", "ChainLightning", "Singularity" },
                 Upgrades = {
                     "DanceMove", "Drummerang", "Sprint", "StrongAttack", "Windmill", "FeverRush",
                     "DropTheBaxe", "DropTheBaxe_ExtraPerfectDamage", "DropTheBaxe_Upgrade_01",
@@ -197,7 +182,7 @@ local Config = {
             {
                 Name = "Prophet Counter Tank",
                 MirrorPlayer1Skills = false,
-                BossAbilities = { "BlockAndRetaliate", "Singularity", "DropTheBaxe", "FeverRush" },
+                BossAbilities = { "BlockAndRetaliate", "Singularity", "DropTheBaxe", "VermillionDance" },
                 Upgrades = {
                     "DanceMove", "Drummerang", "Sprint", "StrongAttack", "Windmill", "FeverRush",
                     "BlockAndRetaliate", "Block_ReducedFeverCost", "Block_SuperArmor",

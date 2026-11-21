@@ -1,15 +1,6 @@
--- ============================================================================
--- INPUT ROUTING, STRICT L3+R3 JOIN, PAUSE MENU GAMEPAD BRIDGE & STATIONS
--- ============================================================================
--- * Routes controller 0 vs 1 cleanly (1 KB+M + 1 Pad vs 2 Pads).
--- * Strict Simultaneous L3+R3 (or F6) for P2 join — zero accidental sprint +
---   lock-on triggers and no unintended mid-combat regrouping.
--- * Full Pause Menu Gamepad Bridge so gamepads — even when assigned to Player 2
---   in 1 KB+M + 1 Pad OR 2-Pad mode — can navigate, confirm, adjust settings,
---   switch tabs, back out, and resume Dead as Disco's native Pause Menu.
--- * Uses APagodaPlayerController:SetDisableAllInputsReason(FGameplayTag, bool)
---   to lock P2's gameplay inputs cleanly during P2 Menu or Downed state.
--- ============================================================================
+-- Controller routing (1 KB/M + 1 pad vs 2 pads), per-player input locks,
+-- simultaneous L3+R3 join chord, Dive Bar station routing, and P2 gamepad
+-- bridging for native pause/settings menus.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -26,7 +17,7 @@ InputRouting.OffsetGamepad = true
 InputRouting.LastP2InputTime = 0.0
 
 local ActiveInputLocks = { [0] = {}, [1] = {} }
-local RecentKeys = {}
+local LastStartKeyAt = 0.0
 local LastChordTime = 0.0
 local RedirectingPause = false
 local PauseOpenedAt = 0.0
@@ -41,7 +32,6 @@ local LastPauseBackAt = 0.0
 local CachedPauseSub = nil
 local WasNativeMenuOpen = false
 local LastNativeMenuTopKey = nil
-local MenuOffsetSuppressed = false
 local CachedOrderedLayouts = nil
 local CachedOrderedP1Count = 0
 local CachedLayoutsAt = -1.0
@@ -185,12 +175,10 @@ function InputRouting.SyncGamepadOffset(announce)
         local nativeMenuOpen = InputRouting.IsAnyNativeMenuOpen()
 
         -- In native menus (Main Menu, Pause, Settings, Song Select, Dive Bar stations),
-        -- route Gamepad 0 natively through CommonUI/Slate alongside KB+M & mouse cursor.
+        -- route Gamepad 0 natively through CommonUI/Slate alongside KB+M and mouse cursor.
         if nativeMenuOpen and not p2MenuOpen then
             maps.bOffsetPlayerGamepadIds = false
-            MenuOffsetSuppressed = true
         else
-            MenuOffsetSuppressed = false
             local effective = SessionManager.IsP2Active() and (InputRouting.OffsetGamepad == true) or false
             maps.bOffsetPlayerGamepadIds = effective
         end
@@ -405,7 +393,7 @@ end
 
 local function GetOrderedLayouts()
     local now = os.clock()
-    if CachedOrderedLayouts and (now - CachedLayoutsAt) < 0.35 then
+    if CachedOrderedLayouts and (now - CachedLayoutsAt) < 1.25 then
         local allValid = true
         for i = 1, #CachedOrderedLayouts do
             if not UObjectUtils.IsLive(CachedOrderedLayouts[i]) then
@@ -536,9 +524,8 @@ function InputRouting.IsWidgetVisiblyActive(w)
     end)
     if op <= 0.05 then return false end
 
-    -- All Pagoda menus inherit from UCommonActivatableWidget (IsActivated).
-    -- Pooled deactivated widgets remain inside the layout's viewport tree (IsInViewport() == true),
-    -- so if IsActivated exists on the widget, we MUST require IsActivated() == true!
+    -- Pagoda menus inherit UCommonActivatableWidget and stay pooled in the viewport tree
+    -- while deactivated, so require IsActivated() == true when available.
     local hasIsActivated = false
     local isAct = false
     pcall(function()
@@ -567,7 +554,7 @@ function InputRouting.IsAnyNativeMenuOpen()
     if InputRouting.IsGamePaused() and not pausedByP2Menu then return true end
 
     local now = os.clock()
-    if (now - CachedNativeMenuOpenAt) < 0.18 then
+    if (now - CachedNativeMenuOpenAt) < 0.40 then
         return CachedNativeMenuOpen
     end
 
@@ -827,8 +814,7 @@ local function FocusWidgetForAllPlayers(widget, containerWidget)
     SessionManager.RefreshControllers()
     local p1 = SessionManager.GetP1()
     local wbl = UObjectUtils.GetWidgetBlueprintLibrary()
-    -- Centralized menus belong strictly to Player 1 (LocalPlayer[0]).
-    -- Never call SetUserFocus(p2) or SetInputMode_GameAndUIEx(p2) here or P2 steals Slate focus from P1!
+    -- Centralized menus belong to LocalPlayer[0]; giving focus to p2 steals Slate focus from P1.
     if wbl and p1 then
         pcall(function() wbl:SetInputMode_GameAndUIEx(p1, widget, 0, false) end)
     end
@@ -928,7 +914,7 @@ end
 function InputRouting.EnsurePauseMenuFocused()
     pcall(function()
         SessionManager.RefreshControllers()
-        local p1, p2 = SessionManager.GetP1(), SessionManager.GetP2()
+        local p1 = SessionManager.GetP1()
         local p1Menu, p2Menu = FindActivePauseMenus()
         local topStack = FindTopActiveStackWidget()
         local topW = UObjectUtils.IsLive(topStack) and topStack
@@ -1005,29 +991,20 @@ local function EvalPauseEdge(keyId, isDown, now, allowRepeat)
 end
 
 local function IsPausePadKeyDown(p1, p2, keyName)
+    -- Poll P2 only; with bOffsetPlayerGamepadIds=false in menus, Pad 0 drives P1 natively via CommonUI.
+    if not UObjectUtils.IsLive(p2) then return false end
     local ks = GetKeyStruct(keyName)
     local down = false
-    if UObjectUtils.IsLive(p2) then
-        pcall(function() down = (p2:IsInputKeyDown(ks) == true) end)
-    end
-    -- In 1 KB/M + 1 Pad mode (OffsetGamepad == true), only one physical gamepad exists;
-    -- if bOffsetPlayerGamepadIds = false routed it to p1, read p1 as well so it works 100% of the time!
-    if (not down) and InputRouting.OffsetGamepad == true and UObjectUtils.IsLive(p1) then
-        pcall(function() down = (p1:IsInputKeyDown(ks) == true) end)
-    end
+    pcall(function() down = (p2:IsInputKeyDown(ks) == true) end)
     return down
 end
 
 local function GetPausePadAnalog(p1, p2, keyName)
+    if not UObjectUtils.IsLive(p2) then return 0.0 end
     local ks = GetKeyStruct(keyName)
-    local v2, v1 = 0.0, 0.0
-    if UObjectUtils.IsLive(p2) then
-        pcall(function() v2 = tonumber(p2:GetInputAnalogKeyState(ks)) or 0.0 end)
-    end
-    if InputRouting.OffsetGamepad == true and UObjectUtils.IsLive(p1) then
-        pcall(function() v1 = tonumber(p1:GetInputAnalogKeyState(ks)) or 0.0 end)
-    end
-    return (math.abs(v2) >= math.abs(v1)) and v2 or v1
+    local v2 = 0.0
+    pcall(function() v2 = tonumber(p2:GetInputAnalogKeyState(ks)) or 0.0 end)
+    return v2
 end
 
 local function PauseKeyEdge(p1, p2, keyName, now, allowRepeat)
@@ -1135,30 +1112,39 @@ local function TickPauseGamepadBridge(now, topW, isInSubMenu)
         return
     end
 
+    -- Fast-exit BEFORE walking the UMG WidgetTree if P2 pressed no directional/shoulder/confirm input
+    local lb = PauseKeyEdge(p1, p2, "Gamepad_LeftShoulder", now, false)
+    local rb = PauseKeyEdge(p1, p2, "Gamepad_RightShoulder", now, false)
+    local moveUp    = PauseKeyEdge(p1, p2, "Gamepad_DPad_Up", now, true)    or EvalPauseEdge("P:StickUp", stickUp, now, true)
+    local moveDown  = PauseKeyEdge(p1, p2, "Gamepad_DPad_Down", now, true)  or EvalPauseEdge("P:StickDown", stickDown, now, true)
+    local moveLeft  = PauseKeyEdge(p1, p2, "Gamepad_DPad_Left", now, true)  or EvalPauseEdge("P:StickLeft", stickLeft, now, true)
+    local moveRight = PauseKeyEdge(p1, p2, "Gamepad_DPad_Right", now, true) or EvalPauseEdge("P:StickRight", stickRight, now, true)
+    local confirmA  = PauseKeyEdge(p1, p2, "Gamepad_FaceButton_Bottom", now, false)
+
+    if not (lb or rb or moveUp or moveDown or moveLeft or moveRight or confirmA) then
+        return
+    end
+
     local buttons, navButtons = CollectInteractiveWidgets(topW)
 
     -- 2. LB / RB Tab switching (Settings / Pagoda NavBar)
-    if #navButtons > 1 then
-        local lb = PauseKeyEdge(p1, p2, "Gamepad_LeftShoulder", now, false)
-        local rb = PauseKeyEdge(p1, p2, "Gamepad_RightShoulder", now, false)
-        if lb or rb then
-            local curNavIdx = 1
-            for i, entry in ipairs(navButtons) do
-                local sel = false
-                pcall(function()
-                    if type(entry.Widget.GetSelected) == "function" and entry.Widget:GetSelected() then
-                        sel = true
-                    elseif type(entry.Widget.HasUserFocus) == "function" and (entry.Widget:HasUserFocus(p1) or entry.Widget:HasUserFocus(p2)) then
-                        sel = true
-                    end
-                end)
-                if sel then curNavIdx = i; break end
-            end
-            local nextIdx = ((curNavIdx - 1 + (rb and 1 or -1)) % #navButtons) + 1
-            ClickButtonCleanly(navButtons[nextIdx].Widget)
-            Scheduler.Delay(60, "Pause.NavFocus", InputRouting.EnsurePauseMenuFocused)
-            return
+    if (lb or rb) and #navButtons > 1 then
+        local curNavIdx = 1
+        for i, entry in ipairs(navButtons) do
+            local sel = false
+            pcall(function()
+                if type(entry.Widget.GetSelected) == "function" and entry.Widget:GetSelected() then
+                    sel = true
+                elseif type(entry.Widget.HasUserFocus) == "function" and (entry.Widget:HasUserFocus(p1) or entry.Widget:HasUserFocus(p2)) then
+                    sel = true
+                end
+            end)
+            if sel then curNavIdx = i; break end
         end
+        local nextIdx = ((curNavIdx - 1 + (rb and 1 or -1)) % #navButtons) + 1
+        ClickButtonCleanly(navButtons[nextIdx].Widget)
+        Scheduler.Delay(60, "Pause.NavFocus", InputRouting.EnsurePauseMenuFocused)
+        return
     end
 
     if #buttons == 0 then return end
@@ -1184,8 +1170,6 @@ local function TickPauseGamepadBridge(now, topW, isInSubMenu)
     local curEntry = buttons[curIdx]
 
     -- 3. Up / Down navigation
-    local moveUp   = PauseKeyEdge(p1, p2, "Gamepad_DPad_Up", now, true) or EvalPauseEdge("P:StickUp", stickUp, now, true)
-    local moveDown = PauseKeyEdge(p1, p2, "Gamepad_DPad_Down", now, true) or EvalPauseEdge("P:StickDown", stickDown, now, true)
     if moveUp or moveDown then
         local delta = moveDown and 1 or -1
         local nextIdx = ((curIdx - 1 + delta) % #buttons) + 1
@@ -1196,8 +1180,6 @@ local function TickPauseGamepadBridge(now, topW, isInSubMenu)
     end
 
     -- 4. Left / Right (rotator/slider adjustment or horizontal button step)
-    local moveLeft  = PauseKeyEdge(p1, p2, "Gamepad_DPad_Left", now, true)  or EvalPauseEdge("P:StickLeft", stickLeft, now, true)
-    local moveRight = PauseKeyEdge(p1, p2, "Gamepad_DPad_Right", now, true) or EvalPauseEdge("P:StickRight", stickRight, now, true)
     if moveLeft or moveRight then
         local rot, slider = FindSubRotatorOrSlider(curEntry.Widget)
         if UObjectUtils.IsLive(rot) then
@@ -1232,7 +1214,7 @@ local function TickPauseGamepadBridge(now, topW, isInSubMenu)
     end
 
     -- 5. Confirm (A button)
-    if PauseKeyEdge(p1, p2, "Gamepad_FaceButton_Bottom", now, false) then
+    if confirmA then
         if curEntry and UObjectUtils.IsLive(curEntry.Widget) then
             FocusWidgetForAllPlayers(curEntry.Widget, topW)
             ClickButtonCleanly(curEntry.Widget)
@@ -1255,12 +1237,20 @@ end
 function InputRouting.ResetMenuState()
     WasNativeMenuOpen = false
     WasPausedLastTick = false
-    MenuOffsetSuppressed = false
     LastNativeMenuTopKey = nil
     PauseActiveWidgetKey = nil
     LastFocusedSubWidgetKey = nil
     PausePrevInputs = {}
     PauseHoldRepeat = {}
+    CachedPauseSub = nil
+    CachedOrderedLayouts = nil
+    CachedOrderedP1Count = 0
+    CachedLayoutsAt = -1.0
+    CachedNativeMenuOpen = false
+    CachedNativeMenuOpenAt = -1.0
+    JoinHoldStart = nil
+    JoinTriggeredWhileHeld = false
+    LastReportedJoinProgress = 0.0
     pcall(function()
         local maps = UObjectUtils.GetGameMapsSettings()
         if maps and not UObjectUtils.IsGameplayWorld() then
@@ -1318,7 +1308,6 @@ function InputRouting.TickPauseSafety(now)
         end
     elseif WasNativeMenuOpen then
         WasNativeMenuOpen = false
-        MenuOffsetSuppressed = false
         LastNativeMenuTopKey = nil
         if p2 then
             InputRouting.SetPlayerInputLock(p2, "LocalCoop.InGameMenu", false)
@@ -1361,8 +1350,8 @@ function InputRouting.TickPauseSafety(now)
                     end
                 end, true)
             end
-        elseif nativeMenuOpen then
-            -- Allow P2's gamepad (in both 1 KB/M + 1 Pad and 2-Pad modes) to drive open non-pause native menus
+        elseif nativeMenuOpen and InputRouting.OffsetGamepad == false then
+            -- In 2-gamepad mode, bridge P2's pad onto open non-pause native menus.
             local _, isInSub, stackTop = InputRouting.HasAnyActiveMenuOnStack()
             if UObjectUtils.IsLive(stackTop) then
                 TickPauseGamepadBridge(now, stackTop, isInSub)
@@ -1526,9 +1515,7 @@ function InputRouting.TryResumePauseMenu()
     return resumed
 end
 
--- ============================================================================
--- DIVE BAR STATION INTERCEPTION & P2 GAMEPAD CHORDS (5-TAB INDICES!)
--- ============================================================================
+-- Dive Bar station interception and P2 gamepad bindings
 
 function InputRouting.TryOpenDiveBarStationForP2()
     local inCfg = Config.Input or {}
@@ -1571,24 +1558,6 @@ function InputRouting.DidP2TriggerStation(stationActor)
     return recent and (d2 <= 480.0 * 480.0) and (d2 <= d1 + 40000.0)
 end
 
-local function IsChordDown(pc, keys, now)
-    if type(keys) ~= "table" or #keys == 0 or not UObjectUtils.IsLive(pc) then return false end
-    local k = UObjectUtils.GetKey(pc)
-    local rec = k and RecentKeys[k] or nil
-    for _, keyName in ipairs(keys) do
-        local down = false
-        local win = (keyName == "Gamepad_Special_Left" or keyName == "Gamepad_Special_Right") and 1.15 or 0.55
-        if rec and rec[keyName] and (now - rec[keyName]) <= win then
-            down = true
-        else
-            local ok, r = pcall(function() return pc:IsInputKeyDown(GetKeyStruct(keyName)) end)
-            if ok and r == true then down = true end
-        end
-        if not down then return false end
-    end
-    return true
-end
-
 function InputRouting.OnGamepadKey(pc, keyName)
     local inCfg = Config.Input or {}
     local menuCfg = Config.P2Menu or {}
@@ -1606,42 +1575,36 @@ function InputRouting.OnGamepadKey(pc, keyName)
     local p2MenuOpen = Callbacks.IsP2MenuOpen and Callbacks.IsP2MenuOpen() or false
 
     if keyName and keyName ~= "" then
-        local pcKey = UObjectUtils.GetKey(pc)
-        if pcKey then
-            RecentKeys[pcKey] = RecentKeys[pcKey] or {}
-            local prev = RecentKeys[pcKey][keyName]
-            RecentKeys[pcKey][keyName] = now
-
-            if keyName == "Gamepad_Special_Right" and pid == 1 then
-                if prev and (now - prev) < 0.25 then return end
-                local wasPausedByP2 = Callbacks.IsPausedByP2Menu and Callbacks.IsPausedByP2Menu() or false
-                if Callbacks.CloseP2MenuIfOpen then UObjectUtils.SafeCall("Start.CloseMenu", Callbacks.CloseP2MenuIfOpen) end
-                if wasPausedByP2 then
-                    LastChordTime = now
-                    return
-                end
-                if not InputRouting.IsGamePaused() then
-                    Scheduler.Delay(35, "Pause.OpenOnP1", function()
-                        if not UObjectUtils.IsGameplayWorld() then return end
-                        if inCfg.RoutePauseMenuToPrimaryViewport ~= false then
-                            InputRouting.DeactivateOrphanP2PauseMenus()
-                        end
-                        if not InputRouting.IsGamePaused() then
-                            InputRouting.OpenPauseMenuOnP1(nil)
-                        end
-                    end)
-                elseif inCfg.EnablePauseMenuP2Gamepad == false then
-                    local _, isInSub, topW = InputRouting.HasAnyActiveMenuOnStack()
-                    if isInSub and UObjectUtils.IsLive(topW) then
-                        Scheduler.Delay(25, "Pause.BackSub", function() BackOutSubMenu(topW) end)
-                    elseif (now - LastResumeRequestedAt) >= 0.45 then
-                        LastResumeRequestedAt = now
-                        Scheduler.Delay(30, "Pause.Resume", InputRouting.TryResumePauseMenu)
-                    end
-                end
+        if keyName == "Gamepad_Special_Right" and pid == 1 then
+            if (now - LastStartKeyAt) < 0.25 then return end
+            LastStartKeyAt = now
+            local wasPausedByP2 = Callbacks.IsPausedByP2Menu and Callbacks.IsPausedByP2Menu() or false
+            if Callbacks.CloseP2MenuIfOpen then UObjectUtils.SafeCall("Start.CloseMenu", Callbacks.CloseP2MenuIfOpen) end
+            if wasPausedByP2 then
                 LastChordTime = now
                 return
             end
+            if not InputRouting.IsGamePaused() then
+                Scheduler.Delay(35, "Pause.OpenOnP1", function()
+                    if not UObjectUtils.IsGameplayWorld() then return end
+                    if inCfg.RoutePauseMenuToPrimaryViewport ~= false then
+                        InputRouting.DeactivateOrphanP2PauseMenus()
+                    end
+                    if not InputRouting.IsGamePaused() then
+                        InputRouting.OpenPauseMenuOnP1(nil)
+                    end
+                end)
+            elseif inCfg.EnablePauseMenuP2Gamepad == false then
+                local _, isInSub, topW = InputRouting.HasAnyActiveMenuOnStack()
+                if isInSub and UObjectUtils.IsLive(topW) then
+                    Scheduler.Delay(25, "Pause.BackSub", function() BackOutSubMenu(topW) end)
+                elseif (now - LastResumeRequestedAt) >= 0.45 then
+                    LastResumeRequestedAt = now
+                    Scheduler.Delay(30, "Pause.Resume", InputRouting.TryResumePauseMenu)
+                end
+            end
+            LastChordTime = now
+            return
         end
 
         -- When P2 Menu is open, single authoritative polling loop inside P2Menu owns P2 input
@@ -1661,7 +1624,7 @@ function InputRouting.OnGamepadKey(pc, keyName)
 
         local menuKey = inCfg.GamepadMenuToggleKey or "Gamepad_Special_Left"
         if pid == 1 and keyName == menuKey and menuCfg.Enabled ~= false and not InputRouting.IsGamePaused() then
-            Scheduler.Delay(160, "Input.OpenP2Menu", function()
+            Scheduler.ReplaceDelay(160, "Input.OpenP2Menu", function()
                 local openNow = Callbacks.IsP2MenuOpen and Callbacks.IsP2MenuOpen() or false
                 if openNow or InputRouting.IsGamePaused() or not UObjectUtils.IsGameplayWorld() then return end
                 if (os.clock() - LastChordTime) < 0.30 then return end
@@ -1669,10 +1632,6 @@ function InputRouting.OnGamepadKey(pc, keyName)
             end, true)
         end
     end
-
-    if p2MenuOpen then return end
-    -- NOTE: GamepadJoinChord (L3+R3) is handled strictly by simultaneous polling
-    -- in TickJoinChord(now). Model/Loadout hot-swap chords were removed cleanly.
 end
 
 return InputRouting

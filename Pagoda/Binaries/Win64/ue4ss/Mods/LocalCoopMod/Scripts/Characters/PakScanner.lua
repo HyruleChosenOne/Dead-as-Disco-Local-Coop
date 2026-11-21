@@ -1,6 +1,4 @@
--- ============================================================================
--- IN-PROCESS UE5 IOSTORE (.utoc) / LEGACY (.pak) / CSM MANIFEST SCANNER
--- ============================================================================
+-- Scans IOStore (.utoc), legacy (.pak), and info.json manifests in Content/Paks for CSM characters.
 
 local UObjectUtils = require("Utils.UObjectUtils")
 local Logger = require("Utils.Logger")
@@ -119,6 +117,17 @@ local function ListContainerFiles(root)
         end
         scanExt(".utoc", utocs)
         scanExt(".pak", paks)
+        local okInfo, pInfo = pcall(io.popen, 'dir /b /s /a-d "' .. winRoot .. '\\info.json" 2>nul')
+        if okInfo and pInfo then
+            for line in pInfo:lines() do
+                local lowLine = line:lower()
+                if not seen[lowLine] then
+                    seen[lowLine] = true
+                    infos[#infos + 1] = line
+                end
+            end
+            pInfo:close()
+        end
     end
 
     return utocs, paks, infos
@@ -138,10 +147,12 @@ local function ParseUtocPaths(data)
     local off = hdrSize
     off = off + entryCount * 12 + entryCount * 10 + seeds * 4 + noHash * 4
     off = off + cblkCount * 12 + cmethCount * cmethLen
+    if off < 0 or off + 4 > #data then return nil end
     if (flags & 4) ~= 0 then
         local hs = u("<I4", data, off + 1)
         off = off + 4 + hs * 2 + cblkCount * 20
     end
+    if off < 0 or off >= #data then return nil end
 
     local d = data:sub(off + 1, off + dirIdxSize)
     if #d < 16 then return nil end
@@ -151,27 +162,36 @@ local function ParseUtocPaths(data)
         local n = u("<i4", d, p); p = p + 4
         if n == 0 then return "" end
         if n < 0 then
-            local raw = d:sub(p, p + (-n * 2) - 1); p = p + (-n * 2)
+            local byteLen = -n * 2
+            if p + byteLen - 1 > #d then return "" end
+            local raw = d:sub(p, p + byteLen - 1); p = p + byteLen
             return (raw:gsub("(.)%z", "%1")):sub(1, -2)
         end
+        if p + n - 1 > #d then return "" end
         local s = d:sub(p, p + n - 2); p = p + n
         return s
     end
 
     local mount = fstr()
+    if p + 3 > #d then return nil end
     local nd = u("<I4", d, p); p = p + 4
+    if nd > 200000 or p + nd * 16 > #d + 1 then return nil end
     local dirs = {}
     for i = 0, nd - 1 do
         local a, b, c, e = u("<I4I4I4I4", d, p); p = p + 16
         dirs[i] = { a, b, c, e }
     end
+    if p + 3 > #d then return nil end
     local nf = u("<I4", d, p); p = p + 4
+    if nf > 500000 or p + nf * 12 > #d + 1 then return nil end
     local files = {}
     for i = 0, nf - 1 do
         local a, b = u("<I4I4", d, p); p = p + 12
         files[i] = { a, b }
     end
+    if p + 3 > #d then return nil end
     local ns = u("<I4", d, p); p = p + 4
+    if ns > 500000 then return nil end
     local names = {}
     for i = 0, ns - 1 do names[i] = fstr() end
 

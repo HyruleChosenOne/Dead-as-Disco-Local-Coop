@@ -1,22 +1,7 @@
--- ============================================================================
--- CO-OP REVIVE STATE MACHINE & GROUNDED -> DANCE RECOVERY
--- ============================================================================
--- Explicit Per-Player States:
---   "Alive" | "Downed" | "BeingRevived" | "Invulnerable" | "Wiped"
---
--- Features:
---   1. Real Downed-on-Ground Animation:
---        * Plays cooked AM_Player_KnockBwd_Land_Bwd and pauses flat on floor
---          (with AM_Player_GetUp_Bwd @ 0.03s ground hold fallback).
---   2. Stand-Up Disco Dance on Revive:
---        * Kips up via AM_Player_Knockdown_GetUp_Quick_Bwd -> celebrates with
---          a random/rotating AM_Player_Dance_* montage (input-cancellable!).
---   3. Dynamic Revive Circle (via UI.ReviveOverlay):
---        * 3D floor boundary ring + spinning expanding progress ring around the
---          downed player, plus a projected native circular medallion HUD.
---   4. Guaranteed 3-Tier HP Restoration + Anti-Re-Down Guard (never stuck at 1 HP).
---   5. Native FMOD Audio Cues + Simultaneous Double-Down Wipe (GE_Die).
--- ============================================================================
+-- Per-player revive state machine: Alive, Downed, BeingRevived, Invulnerable, Wiped.
+-- Intercepts lethal damage via GE_DeathImmune, plays a grounded death animation while
+-- waiting for revive, restores HP on recovery with brief i-frames, and triggers a
+-- standard team wipe if both players go down simultaneously.
 
 local UEHelpers = require("UEHelpers")
 local UObjectUtils = require("Utils.UObjectUtils")
@@ -25,6 +10,7 @@ local Scheduler = require("Core.Scheduler")
 local SessionManager = require("Core.SessionManager")
 local InputRouting = require("Input.InputRouting")
 local ReviveOverlay = require("UI.ReviveOverlay")
+local EnemyAIDirector = require("Gameplay.EnemyAIDirector")
 local UITheme = require("UI.UITheme")
 
 local ReviveSystem = {}
@@ -52,16 +38,22 @@ local ANIM_MONTAGE_PATHS = {
     Knockdown  = "/Game/Pagoda/Characters/Player/Animations/Hit_Reactions/AM_Player_KnockBwd_Land_Bwd.AM_Player_KnockBwd_Land_Bwd",
     GroundPose = "/Game/Pagoda/Characters/Player/Animations/Hit_Reactions/AM_Player_GetUp_Bwd.AM_Player_GetUp_Bwd",
     QuickGetUp = "/Game/Pagoda/Characters/Player/Animations/Hit_Reactions/AM_Player_Knockdown_GetUp_Quick_Bwd.AM_Player_Knockdown_GetUp_Quick_Bwd",
+    DeathBackM = "/Game/Pagoda/Characters/Enemies/Grunt/Animations/AM_AI_Grunt_Death_Back_CC.AM_AI_Grunt_Death_Back_CC",
+    DeathGutM  = "/Game/Pagoda/Characters/Enemies/Grunt/Animations/AM_AI_Grunt_Death_Gut_CD.AM_AI_Grunt_Death_Gut_CD",
 }
 
--- Flat supine floor poses played when downed, combined with a backward floor tilt on
--- pawn.Mesh so downed characters lie genuinely flat on their back on the ground.
-local GROUND_ANIM_SEQUENCES = {
-    Primary     = "/Game/Pagoda/Characters/Player/Animations/Cinematics/A_Player_Cinematic_FTUE_Intro_Revival.A_Player_Cinematic_FTUE_Intro_Revival",
-    PrimaryPos  = 0.02,
-    Fallback    = "/Game/Pagoda/Characters/Player/Animations/Hit_Reactions/A_Player_GetUp_Bwd.A_Player_GetUp_Bwd",
-    FallbackPos = 0.02,
+-- Cooked SKEL_Humanoid fall-to-ground death AnimSequences played via
+-- PlaySlotAnimationAsDynamicMontage on the player's montage slot so both
+-- vanilla Charlie and retargeted CSMs lie flat until revived.
+local DEATH_ANIM_SEQUENCE_PATHS = {
+    "/Game/Pagoda/Characters/Enemies/Grunt/Animations/A_AI_Grunt_Death_Back_CC.A_AI_Grunt_Death_Back_CC",
+    "/Game/Pagoda/Characters/Enemies/Grunt/Animations/A_AI_Grunt_Death_Gut_CD.A_AI_Grunt_Death_Gut_CD",
+    "/Game/Pagoda/Characters/Enemies/Grunt/Animations/A_AI_Grunt_Death_Gut_CC.A_AI_Grunt_Death_Gut_CC",
+    "/Game/Pagoda/Characters/Player/Animations/Hit_Reactions/A_Player_KnockBwd_Land_Bwd.A_Player_KnockBwd_Land_Bwd",
 }
+
+local CachedPlayerSlotName = nil
+local DeathAnimCycleIndex = 0
 
 local REVIVE_DANCE_PATHS = {
     "/Game/Pagoda/Characters/Player/Animations/Dance_Moves/AM_Player_Dance_AbsoluteDisco.AM_Player_Dance_AbsoluteDisco",
@@ -73,7 +65,6 @@ local REVIVE_DANCE_PATHS = {
 
 local CachedAssets = {}
 local CachedMontages = {}
-local CachedStimuliClass = nil
 local AssetsCheckedThisWorld = false
 local GrantedRevivePawns = {}
 local LastDeaggroAt = 0.0
@@ -93,6 +84,7 @@ local function CreatePlayerState()
         DeathImmuneHandle = nil,
         DeathImmuneAscKey = nil,
         DownedGEHandles = {},
+        DownedAvoidTags = {},
         InvulnGEHandle = nil,
         InvulnBreakOffHandle = nil,
         TempHealGEHandle = nil,
@@ -101,15 +93,9 @@ local function CreatePlayerState()
         TempHealExpireAt = 0.0,
         DownedPawn = nil,
         DownedMontage = nil,
-        DownedHoldPos = 0.02,
-        DownedAnimLocked = false,
-        DownedSingleNodeActive = false,
-        SavedAnimClass = nil,
-        SavedMeshRelLoc = nil,
-        SavedMeshRelRot = nil,
-        MeshTiltApplied = false,
         DownedSeqAsset = nil,
-        DownedSeqPos = 0.02,
+        DownedHoldPos = 0.60,
+        DownedAnimLocked = false,
         ReviveDanceMontage = nil,
         ReviveDanceStartAt = 0.0,
         ReviveDanceEndAt = 0.0,
@@ -121,12 +107,6 @@ end
 ReviveSystem.Players = {
     [0] = CreatePlayerState(),
     [1] = CreatePlayerState(),
-}
-
-local AI_TARGET_BB_KEYS = {
-    "TargetActor", "Target", "PlayerTarget", "TargetPlayer",
-    "CombatTarget", "AttackTarget", "EnemyTarget", "TargetPawn",
-    "AggroTarget", "PendingAttackPlayerTarget",
 }
 
 local CANCEL_GAMEPAD_KEYS = {
@@ -152,14 +132,6 @@ function ReviveSystem.Init(config, callbacks)
     Callbacks = callbacks or {}
 end
 
-function ReviveSystem.DestroyHUD()
-    ReviveOverlay.Destroy()
-end
-
-function ReviveSystem.HideHUD()
-    ReviveOverlay.Hide()
-end
-
 -- ============================================================================
 -- ASSET LOADING & ANIMATION MONTAGE HELPERS
 -- ============================================================================
@@ -180,8 +152,9 @@ end
 local function LoadMontage(path)
     if not path then return nil end
     local cached = CachedMontages[path]
-    if cached ~= nil then
-        return UObjectUtils.IsValid(cached) and cached or nil
+    if cached == false then return nil end
+    if cached ~= nil and UObjectUtils.IsValid(cached) then
+        return cached
     end
     local obj = UObjectUtils.LoadObject(path)
     CachedMontages[path] = UObjectUtils.IsValid(obj) and obj or false
@@ -227,205 +200,103 @@ local function StopPawnMontage(pawn, montage, blendOut)
     end
 end
 
-local function CaptureOriginalMeshTransform(st, mc)
-    if not UObjectUtils.IsValid(mc) then return end
-    if st.SavedMeshRelLoc and st.SavedMeshRelRot and not st.MeshTiltApplied then return end
-    local loc = { X = 0.0, Y = 0.0, Z = -88.0 }
-    local rot = { Pitch = 0.0, Yaw = -90.0, Roll = 0.0 }
+local function ResolvePlayerMontageSlotName()
+    if CachedPlayerSlotName ~= nil then return CachedPlayerSlotName end
+    local slotName = FName("DefaultSlot")
     pcall(function()
-        local rl = mc.RelativeLocation
-        if rl and type(rl.Z) == "number" then
-            loc = { X = rl.X or 0.0, Y = rl.Y or 0.0, Z = (rl.Z < -30.0) and rl.Z or -88.0 }
-        end
-        local rr = mc.RelativeRotation
-        if rr and type(rr.Yaw) == "number" and math.abs(rr.Roll or 0.0) < 10.0 and math.abs(rr.Pitch or 0.0) < 10.0 then
-            rot = { Pitch = rr.Pitch or 0.0, Yaw = rr.Yaw or -90.0, Roll = rr.Roll or 0.0 }
+        local refMontage = LoadMontage(ANIM_MONTAGE_PATHS.Knockdown) or LoadMontage(ANIM_MONTAGE_PATHS.QuickGetUp)
+        if UObjectUtils.IsValid(refMontage) and refMontage.SlotAnimTracks then
+            local track = refMontage.SlotAnimTracks[1]
+            if track and track.SlotName then
+                local s = track.SlotName:ToString()
+                if type(s) == "string" and s ~= "" and s ~= "None" then
+                    slotName = track.SlotName
+                end
+            end
         end
     end)
-    st.SavedMeshRelLoc = loc
-    st.SavedMeshRelRot = rot
+    CachedPlayerSlotName = slotName
+    return slotName
 end
 
-local function ApplyDownedFloorMeshTilt(st, mc, targetRollDeg, zLiftUU, alpha)
-    if not UObjectUtils.IsValid(mc) then return end
-    CaptureOriginalMeshTransform(st, mc)
-    local baseLoc = st.SavedMeshRelLoc or { X = 0.0, Y = 0.0, Z = -88.0 }
-    local baseRot = st.SavedMeshRelRot or { Pitch = 0.0, Yaw = -90.0, Roll = 0.0 }
-    local t = math.max(0.0, math.min(1.0, tonumber(alpha) or 1.0))
-
-    -- In UE5 ACharacter (Mesh Yaw = -90, facing +Y in local mesh space):
-    -- FRotator applies Roll (around local X = shoulder axis) before Yaw (-90),
-    -- so negative Roll tilts the character's head/spine backward onto the floor!
-    local roll = (baseRot.Roll or 0.0) + (targetRollDeg - (baseRot.Roll or 0.0)) * t
-    local z = (baseLoc.Z or -88.0) + (zLiftUU * t)
-    st.MeshTiltApplied = true
+local function GetAnimLengthSafe(animObj)
+    if not UObjectUtils.IsValid(animObj) then return 0.0 end
+    local len = 0.0
     pcall(function()
-        mc:K2_SetRelativeLocation({ X = baseLoc.X or 0.0, Y = baseLoc.Y or 0.0, Z = z }, false, {}, false)
-        mc:K2_SetRelativeRotation({ Pitch = baseRot.Pitch or 0.0, Yaw = baseRot.Yaw or -90.0, Roll = roll }, false, {}, false)
+        if type(animObj.GetPlayLength) == "function" then
+            len = tonumber(animObj:GetPlayLength()) or 0.0
+        end
     end)
+    if len <= 0.05 then
+        pcall(function() len = tonumber(animObj.SequenceLength) or 0.0 end)
+    end
+    return len
 end
 
-local function RestoreMeshTransform(st, mc)
-    if not UObjectUtils.IsValid(mc) then
-        st.MeshTiltApplied = false
-        return
-    end
-    if st.MeshTiltApplied or st.SavedMeshRelLoc or st.SavedMeshRelRot then
-        local baseLoc = st.SavedMeshRelLoc or { X = 0.0, Y = 0.0, Z = -88.0 }
-        local baseRot = st.SavedMeshRelRot or { Pitch = 0.0, Yaw = -90.0, Roll = 0.0 }
-        pcall(function()
-            mc:K2_SetRelativeLocation(baseLoc, false, {}, false)
-            mc:K2_SetRelativeRotation(baseRot, false, {}, false)
-        end)
-    end
-    st.MeshTiltApplied = false
-end
-
-local function DoesAnimMatchMeshSkeleton(animAsset, mc)
-    if not (UObjectUtils.IsValid(animAsset) and UObjectUtils.IsValid(mc)) then return false end
-    local ok, match = pcall(function()
-        local meshAsset = mc:GetSkeletalMeshAsset() or mc:GetSkinnedAsset() or mc.SkeletalMesh
-        if not UObjectUtils.IsValid(meshAsset) then return false end
-        local mSkel = meshAsset:GetSkeleton()
-        local aSkel = animAsset:GetSkeleton()
-        return UObjectUtils.IsValid(mSkel) and UObjectUtils.IsValid(aSkel) and UObjectUtils.Same(mSkel, aSkel)
+local function PlayDeathDynamicMontage(animInst, seq, startPos, blendIn)
+    if not (UObjectUtils.IsValid(animInst) and UObjectUtils.IsValid(seq)) then return nil, 0.0 end
+    local slotName = ResolvePlayerMontageSlotName()
+    local len = GetAnimLengthSafe(seq)
+    local dyn = nil
+    pcall(function()
+        -- LoopCount=999 with BlendOutTime=0.02 prevents early blend-out back to standing idle
+        -- before MaintainDownedAnimation freezes it cleanly at the final lying-flat frame.
+        dyn = animInst:PlaySlotAnimationAsDynamicMontage(
+            seq, slotName, blendIn or 0.12, 0.02, 1.0, 999, -1.0, startPos or 0.0
+        )
     end)
-    return ok and match == true
+    if UObjectUtils.IsValid(dyn) then
+        local dLen = GetAnimLengthSafe(dyn)
+        if dLen > 0.10 then len = dLen end
+        return dyn, len
+    end
+    return nil, 0.0
 end
 
-local function LockPawnFlatOnGround(st, pawn)
-    if not UObjectUtils.IsLive(pawn) then return false end
-    local mc = nil
-    pcall(function() mc = pawn.Mesh end)
-    if not UObjectUtils.IsValid(mc) then return false end
-
-    CaptureOriginalMeshTransform(st, mc)
-    if not UObjectUtils.IsValid(st.SavedAnimClass) then
-        pcall(function()
-            local ac = mc.AnimClass
-            if UObjectUtils.IsValid(ac) then st.SavedAnimClass = ac end
-        end)
-    end
-
+local function StartDownedAnimation(st, pawn)
+    if not UObjectUtils.IsLive(pawn) then return end
     pcall(function()
         if pawn.CharacterMovement then
             pawn.CharacterMovement:StopMovementImmediately()
         end
     end)
 
-    local seq = LoadMontage(GROUND_ANIM_SEQUENCES.Primary)
-    local pos = GROUND_ANIM_SEQUENCES.PrimaryPos
-    if not UObjectUtils.IsValid(seq) then
-        seq = LoadMontage(GROUND_ANIM_SEQUENCES.Fallback)
-        pos = GROUND_ANIM_SEQUENCES.FallbackPos
-    end
-
-    -- 1. If the character shares Charlie's SKEL_Humanoid skeleton, lock the floor sequence
-    --    in AnimationSingleNode mode AND tilt the mesh backward (-58 deg) so the propped
-    --    recovery torso lies genuinely flat on the floor!
-    if UObjectUtils.IsValid(seq) and DoesAnimMatchMeshSkeleton(seq, mc) then
-        StopPawnMontage(pawn, nil, 0.0)
-        st.DownedMontage = nil
-        st.DownedSeqAsset = seq
-        st.DownedSeqPos = pos
-
-        pcall(function() mc:SetAnimationMode(1) end) -- EAnimationMode::AnimationSingleNode
-        local okOverride = pcall(function() mc:OverrideAnimationData(seq, false, false, pos, 0.0) end)
-        if not okOverride then
-            pcall(function()
-                mc:PlayAnimation(seq, false)
-                mc:SetPosition(pos, false)
-                mc:Stop()
-            end)
-        end
-
-        ApplyDownedFloorMeshTilt(st, mc, -58.0, 14.0, 1.0)
-        st.DownedSingleNodeActive = true
-        st.DownedAnimLocked = true
-        return true
-    end
-
-    -- 2. For CSM characters with custom skeletons (e.g. Snow Miku), keep AnimationBlueprint (Mode 0)
-    --    active so UE5's AnimInstance retargets, pause AM_Player_GetUp_Bwd if playing, and tilt flat (-78 deg)
     local animInst = GetPawnAnimInstance(pawn)
-    local ground = LoadMontage(ANIM_MONTAGE_PATHS.GroundPose)
-    local montagePlaying = false
-    if UObjectUtils.IsValid(animInst) and UObjectUtils.IsValid(ground) then
-        st.DownedMontage = ground
-        st.DownedHoldPos = 0.02
-        pcall(function() montagePlaying = (animInst:Montage_IsPlaying(ground) == true) end)
-        if not montagePlaying then
-            PlayMontageClean(pawn, ground, 1.0, 0.02)
-            pcall(function() montagePlaying = (animInst:Montage_IsPlaying(ground) == true) end)
-        end
-        if montagePlaying then
-            pcall(function()
-                animInst:Montage_SetPosition(ground, 0.02)
-                animInst:Montage_Pause(ground)
-            end)
-        end
-    end
-
-    local tiltAngle = montagePlaying and -58.0 or -80.0
-    local zLift = montagePlaying and 14.0 or 18.0
-    ApplyDownedFloorMeshTilt(st, mc, tiltAngle, zLift, 1.0)
-    st.DownedSingleNodeActive = false
-    st.DownedAnimLocked = true
-    return true
-end
-
-local function RestorePawnAnimBlueprint(st, pawn)
-    if not UObjectUtils.IsLive(pawn) then return end
-    local mc = nil
-    pcall(function() mc = pawn.Mesh end)
-    if not UObjectUtils.IsValid(mc) then
-        st.DownedSingleNodeActive = false
-        st.DownedAnimLocked = false
-        st.MeshTiltApplied = false
-        return
-    end
-
-    RestoreMeshTransform(st, mc)
-
-    local curMode = 0
-    pcall(function() curMode = tonumber(mc:GetAnimationMode()) or 0 end)
-    if st.DownedSingleNodeActive or curMode ~= 0 then
-        pcall(function() mc:SetAnimationMode(0) end) -- EAnimationMode::AnimationBlueprint
-        local animInst = GetPawnAnimInstance(pawn)
-        if not UObjectUtils.IsValid(animInst) and UObjectUtils.IsValid(st.SavedAnimClass) then
-            pcall(function() mc:SetAnimInstanceClass(st.SavedAnimClass) end)
-        end
-    end
-    st.DownedSingleNodeActive = false
-    st.DownedAnimLocked = false
-    st.DownedSeqAsset = nil
-end
-
-local function StartDownedAnimation(st, pawn)
-    if not UObjectUtils.IsLive(pawn) then return end
     StopPawnMontage(pawn, nil, 0.06)
+    st.DownedMontage = nil
+    st.DownedSeqAsset = nil
+    st.DownedAnimLocked = false
 
-    local mc = nil
-    pcall(function()
-        mc = pawn.Mesh
-        if UObjectUtils.IsValid(mc) then
-            CaptureOriginalMeshTransform(st, mc)
-            if UObjectUtils.IsValid(mc.AnimClass) then
-                st.SavedAnimClass = mc.AnimClass
+    -- Play a cooked SKEL_Humanoid death sequence as a dynamic montage on the player's slot.
+    if UObjectUtils.IsValid(animInst) then
+        local total = #DEATH_ANIM_SEQUENCE_PATHS
+        for attempt = 1, total do
+            DeathAnimCycleIndex = (DeathAnimCycleIndex % total) + 1
+            local seqPath = DEATH_ANIM_SEQUENCE_PATHS[DeathAnimCycleIndex]
+            local seq = LoadMontage(seqPath)
+            if UObjectUtils.IsValid(seq) then
+                local dyn, len = PlayDeathDynamicMontage(animInst, seq, 0.0, 0.12)
+                if UObjectUtils.IsValid(dyn) and len > 0.25 then
+                    st.DownedSeqAsset = seq
+                    st.DownedMontage = dyn
+                    st.DownedHoldPos = math.max(0.15, len - 0.14)
+                    st.DownedAnimLocked = false
+                    return
+                end
             end
         end
-    end)
+    end
 
-    local knock = LoadMontage(ANIM_MONTAGE_PATHS.Knockdown)
-    if UObjectUtils.IsValid(knock) and PlayMontageClean(pawn, knock, 1.35, 0.0) then
-        st.DownedMontage = knock
-        st.DownedAnimLocked = false
-        st.DownedSingleNodeActive = false
-        if UObjectUtils.IsValid(mc) then
-            ApplyDownedFloorMeshTilt(st, mc, -58.0, 14.0, 0.35)
+    -- 2. Fallback: play pre-authored death/knockdown AnimMontage directly
+    for _, key in ipairs({ "DeathBackM", "DeathGutM", "Knockdown" }) do
+        local m = LoadMontage(ANIM_MONTAGE_PATHS[key])
+        if UObjectUtils.IsValid(m) and PlayMontageClean(pawn, m, 1.0, 0.0) then
+            local len = GetAnimLengthSafe(m)
+            st.DownedMontage = m
+            st.DownedHoldPos = (len > 0.25) and math.max(0.15, len - 0.14) or 0.55
+            st.DownedAnimLocked = false
+            return
         end
-    else
-        LockPawnFlatOnGround(st, pawn)
     end
 end
 
@@ -437,71 +308,83 @@ local function MaintainDownedAnimation(st, pawn, now)
         end
     end)
 
-    local mc = nil
-    pcall(function() mc = pawn.Mesh end)
+    local animInst = GetPawnAnimInstance(pawn)
+    if not UObjectUtils.IsValid(animInst) then return end
+
+    local holdPos = tonumber(st.DownedHoldPos) or 0.55
     local elapsed = now - (st.DownedAt or now)
 
-    if not st.DownedAnimLocked then
-        local stillDropping = false
-        if UObjectUtils.IsValid(st.DownedMontage) and elapsed < 0.32 then
-            local animInst = GetPawnAnimInstance(pawn)
-            if UObjectUtils.IsValid(animInst) then
-                pcall(function() stillDropping = (animInst:Montage_IsPlaying(st.DownedMontage) == true) end)
-            end
+    local isPlaying = false
+    local curPos = 0.0
+    if UObjectUtils.IsValid(st.DownedMontage) then
+        pcall(function() isPlaying = (animInst:Montage_IsPlaying(st.DownedMontage) == true) end)
+        if isPlaying then
+            pcall(function() curPos = tonumber(animInst:Montage_GetPosition(st.DownedMontage)) or 0.0 end)
         end
-        if stillDropping then
-            if UObjectUtils.IsValid(mc) then
-                local frac = math.max(0.35, math.min(1.0, elapsed / 0.32))
-                ApplyDownedFloorMeshTilt(st, mc, -58.0, 14.0, frac)
-            end
+    end
+
+    -- Phase 1: Let the character finish falling naturally to the floor
+    if not st.DownedAnimLocked then
+        if isPlaying and curPos < holdPos and elapsed < (holdPos + 0.35) then
             return
         end
-        LockPawnFlatOnGround(st, pawn)
-        return
+        -- Character has reached the flat-on-the-ground pose -> freeze cleanly on the floor
+        st.DownedAnimLocked = true
     end
 
-    if st.DownedSingleNodeActive and UObjectUtils.IsValid(mc) then
-        local mode = 1
-        pcall(function() mode = tonumber(mc:GetAnimationMode()) or 0 end)
-        if mode ~= 1 then
-            LockPawnFlatOnGround(st, pawn)
-        else
-            ApplyDownedFloorMeshTilt(st, mc, -58.0, 14.0, 1.0)
-        end
-        return
-    end
-
-    if UObjectUtils.IsValid(mc) then
-        local animInst = GetPawnAnimInstance(pawn)
-        local ground = st.DownedMontage or LoadMontage(ANIM_MONTAGE_PATHS.GroundPose)
-        local playing = false
-        if UObjectUtils.IsValid(animInst) and UObjectUtils.IsValid(ground) then
-            pcall(function() playing = (animInst:Montage_IsPlaying(ground) == true) end)
-            if playing then
-                pcall(function()
-                    animInst:Montage_SetPosition(ground, 0.02)
-                    animInst:Montage_Pause(ground)
-                end)
+    -- Phase 2: Hold the flat lying-on-ground pose steadily until revived
+    if isPlaying and UObjectUtils.IsValid(st.DownedMontage) then
+        pcall(function()
+            if math.abs(curPos - holdPos) > 0.03 then
+                animInst:Montage_SetPosition(st.DownedMontage, holdPos)
             end
+            animInst:Montage_SetPlayRate(st.DownedMontage, 0.0)
+            animInst:Montage_Pause(st.DownedMontage)
+        end)
+        return
+    end
+
+    -- Re-anchor directly at the lying-flat end frame if anything cleared the montage
+    if UObjectUtils.IsValid(st.DownedSeqAsset) then
+        local dyn = PlayDeathDynamicMontage(animInst, st.DownedSeqAsset, holdPos, 0.04)
+        if UObjectUtils.IsValid(dyn) then
+            st.DownedMontage = dyn
+            pcall(function()
+                animInst:Montage_SetPosition(dyn, holdPos)
+                animInst:Montage_SetPlayRate(dyn, 0.0)
+                animInst:Montage_Pause(dyn)
+            end)
+            return
         end
-        ApplyDownedFloorMeshTilt(st, mc, playing and -58.0 or -80.0, playing and 14.0 or 18.0, 1.0)
+    end
+
+    local fallbackM = UObjectUtils.IsValid(st.DownedMontage) and st.DownedMontage
+        or LoadMontage(ANIM_MONTAGE_PATHS.DeathBackM)
+        or LoadMontage(ANIM_MONTAGE_PATHS.Knockdown)
+    if UObjectUtils.IsValid(fallbackM) then
+        st.DownedMontage = fallbackM
+        if PlayMontageClean(pawn, fallbackM, 1.0, holdPos) then
+            pcall(function()
+                animInst:Montage_SetPosition(fallbackM, holdPos)
+                animInst:Montage_SetPlayRate(fallbackM, 0.0)
+                animInst:Montage_Pause(fallbackM)
+            end)
+        end
     end
 end
 
 local function StopAllReviveMontages(st, pawn)
     if UObjectUtils.IsLive(pawn) then
-        RestorePawnAnimBlueprint(st, pawn)
         if UObjectUtils.IsValid(st.DownedMontage) then
-            StopPawnMontage(pawn, st.DownedMontage, 0.12)
+            StopPawnMontage(pawn, st.DownedMontage, 0.14)
         end
         if UObjectUtils.IsValid(st.ReviveDanceMontage) then
             StopPawnMontage(pawn, st.ReviveDanceMontage, 0.18)
         end
     end
     st.DownedMontage = nil
-    st.DownedAnimLocked = false
-    st.DownedSingleNodeActive = false
     st.DownedSeqAsset = nil
+    st.DownedAnimLocked = false
     st.ReviveDanceMontage = nil
     st.ReviveDanceStartAt = 0.0
     st.ReviveDanceEndAt = 0.0
@@ -528,6 +411,8 @@ local function StartReviveStandUpDance(pid, st, pawn)
     local danceMontage = LoadMontage(dancePath)
     if UObjectUtils.IsValid(danceMontage) then
         Scheduler.ReplaceDelay(360, "Revive.StandUpDance." .. tostring(pid), function()
+            if not SessionManager.IsP2Active() or SessionManager.State.IsInCutscene then return end
+            if UObjectUtils.IsInDiveBar(SessionManager.GetP1()) then return end
             local livePawn = SessionManager.GetPawn(pid)
             local curSt = ReviveSystem.Players[pid]
             if not (UObjectUtils.IsLive(livePawn) and curSt) then return end
@@ -785,92 +670,15 @@ local function RestoreHealthGuaranteed(st, pawn, asc, targetHp, maxHp)
 end
 
 -- ============================================================================
--- ENEMY AI PERCEPTION & AGGRO REDIRECTION
+-- ENEMY AI PERCEPTION & AGGRO REDIRECTION (DELEGATED TO EnemyAIDirector)
 -- ============================================================================
 
 local function SetDownedAIPerception(pawn, exclude)
-    if not UObjectUtils.IsLive(pawn) then return end
-    pcall(function()
-        if not UObjectUtils.IsValid(CachedStimuliClass) then
-            CachedStimuliClass = StaticFindObject("/Script/AIModule.AIPerceptionStimuliSourceComponent")
-        end
-        local stimCls = CachedStimuliClass
-        if UObjectUtils.IsValid(stimCls) then
-            local comps = pawn:K2_GetComponentsByClass(stimCls)
-            UObjectUtils.ForEachObj(comps, function(comp)
-                if exclude then
-                    pcall(function() comp:UnregisterFromPerceptionSystem() end)
-                else
-                    pcall(function() comp:RegisterWithPerceptionSystem() end)
-                end
-            end)
-        end
-    end)
+    EnemyAIDirector.SetPawnAIPerception(pawn, not exclude)
 end
 
 local function DeaggroEnemiesFromDowned(downedPawn, rescuerPawn)
-    local revCfg = Config.Revive or {}
-    SetDownedAIPerception(downedPawn, true)
-    if revCfg.RedirectEnemyAggro == false then return end
-    if not (UObjectUtils.IsLive(downedPawn) and UObjectUtils.IsLive(rescuerPawn)) then return end
-
-    pcall(function()
-        local pagAI = FindAllOf("PagodaAIComponent")
-        if pagAI then
-            for _, comp in pairs(pagAI) do
-                if UObjectUtils.IsValid(comp) then
-                    local at = nil
-                    pcall(function() at = comp.AggroTarget end)
-                    if UObjectUtils.IsLive(at) and UObjectUtils.Same(at, downedPawn) then
-                        pcall(function() comp.AggroTarget = rescuerPawn end)
-                    end
-                    local pt = nil
-                    pcall(function() pt = comp.PendingAttackPlayerTarget end)
-                    if UObjectUtils.IsLive(pt) and UObjectUtils.Same(pt, downedPawn) then
-                        pcall(function() comp.PendingAttackPlayerTarget = rescuerPawn end)
-                    end
-                    local cAI = nil
-                    pcall(function() cAI = comp.CachedAIController end)
-                    if UObjectUtils.IsLive(cAI) then
-                        local foc = nil
-                        pcall(function() foc = cAI:GetFocusActor() end)
-                        if UObjectUtils.IsLive(foc) and UObjectUtils.Same(foc, downedPawn) then
-                            pcall(function() cAI:K2_ClearFocus() end)
-                            pcall(function() cAI:K2_SetFocus(rescuerPawn) end)
-                        end
-                    end
-                end
-            end
-        end
-    end)
-
-    pcall(function()
-        local aiCtrls = FindAllOf("AIController")
-        if aiCtrls then
-            for _, ai in pairs(aiCtrls) do
-                if UObjectUtils.IsLive(ai) then
-                    local focus = nil
-                    pcall(function() focus = ai:GetFocusActor() end)
-                    if UObjectUtils.IsLive(focus) and UObjectUtils.Same(focus, downedPawn) then
-                        pcall(function() ai:K2_ClearFocus() end)
-                        pcall(function() ai:K2_SetFocus(rescuerPawn) end)
-                    end
-
-                    local bb = nil
-                    pcall(function() bb = ai.Blackboard end)
-                    if UObjectUtils.IsValid(bb) then
-                        for _, kStr in ipairs(AI_TARGET_BB_KEYS) do
-                            local fn = FName(kStr)
-                            local okVal, val = pcall(function() return bb:GetValueAsObject(fn) end)
-                            if okVal and UObjectUtils.IsLive(val) and UObjectUtils.Same(val, downedPawn) then
-                                pcall(function() bb:SetValueAsObject(fn, rescuerPawn) end)
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end)
+    EnemyAIDirector.RedirectAllEnemiesOffDowned(downedPawn, rescuerPawn)
 end
 
 -- ============================================================================
@@ -907,6 +715,10 @@ local function ClearPlayerGEs(st, asc, ctrl, pawn)
         RemoveGE(asc, st.DownedGEHandles[i])
     end
     st.DownedGEHandles = {}
+    for i = 1, #(st.DownedAvoidTags or {}) do
+        SetLooseTag(asc, ctrl, st.DownedAvoidTags[i], false)
+    end
+    st.DownedAvoidTags = {}
     if st.InvulnGEHandle ~= nil then
         RemoveGE(asc, st.InvulnGEHandle)
         st.InvulnGEHandle = nil
@@ -932,14 +744,15 @@ function ReviveSystem.ProtectPawn(pid, pawn, ctrl)
     if not UObjectUtils.IsValid(asc) then return end
 
     local ascKey = UObjectUtils.GetKey(asc)
-    if st.DeathImmuneAscKey ~= ascKey then
+    local hasPrevent = HasGameplayTag(asc, "Gameplay.Damage.PreventDeath")
+    if st.DeathImmuneAscKey ~= ascKey or not hasPrevent then
         if UObjectUtils.IsValid(assets.DeathImmune) then
             st.DeathImmuneHandle = ApplySimpleGE(asc, assets.DeathImmune)
         end
         st.DeathImmuneAscKey = ascKey
-    end
-    if not HasGameplayTag(asc, "Gameplay.Damage.PreventDeath") then
-        SetLooseTag(asc, ctrl, "Gameplay.Damage.PreventDeath", true)
+        if not HasGameplayTag(asc, "Gameplay.Damage.PreventDeath") then
+            SetLooseTag(asc, ctrl, "Gameplay.Damage.PreventDeath", true)
+        end
     end
 
     local pKey = UObjectUtils.GetKey(pawn)
@@ -1003,6 +816,7 @@ local function EnterDowned(pid, pawn, ctrl)
     st.OutOfRangeTime = 0.0
     st.DownedPawn = pawn
     st.DownedGEHandles = {}
+    st.DownedAvoidTags = {}
 
     if UObjectUtils.IsValid(asc) then
         ClearTransientHealGEs(st, asc, pawn, nil)
@@ -1015,6 +829,14 @@ local function EnterDowned(pid, pawn, ctrl)
         end
         if not HasGameplayTag(asc, "Status.DBNO") then
             SetLooseTag(asc, ctrl, "Status.DBNO", true)
+        end
+        -- Apply PagodaAIAggroSubsystem's DefaultAvoidAttacksOnTarget tags so C++ aggro ignores downed player
+        local avoidTags = EnemyAIDirector.GetAvoidAttackTagStrings()
+        for _, tagStr in ipairs(avoidTags or {}) do
+            if not HasGameplayTag(asc, tagStr) then
+                SetLooseTag(asc, ctrl, tagStr, true)
+                st.DownedAvoidTags[#st.DownedAvoidTags + 1] = tagStr
+            end
         end
     end
 
@@ -1032,10 +854,11 @@ local function EnterDowned(pid, pawn, ctrl)
     end
 
     local revCfg = Config.Revive or {}
-    ReviveOverlay.SetState(pid, otherPid, pawn, 0.0, false, 0.0, false, tonumber(revCfg.ReviveRadius) or 210.0)
+    ReviveOverlay.SetState(pid, otherPid, pawn, 0.0, false, 0.0, false, tonumber(revCfg.ReviveRadius) or 260.0)
 
     local who = (pid == 0) and "Player 1" or "Player 2"
-    Logger.Info("Revive", "%s entered Downed state (on ground, waiting for revive).", who)
+    Logger.Info("Revive", "%s entered Downed state (hp=%.1f/%.1f, rescuer=P%d).",
+        who, st.DownedHealth or 0.0, ReviveSystem.GetMaxHealth(pawn), otherPid + 1)
 end
 
 local function CompleteRevive(pid, pawn, ctrl)
@@ -1047,28 +870,33 @@ local function CompleteRevive(pid, pawn, ctrl)
     local assets = EnsureAssetsCached()
     local asc = UObjectUtils.GetASC(pawn)
 
-    -- 1. Strip DBNO / MovementDisable / InvalidTarget GEs & tags BEFORE healing
+    -- 1. Strip DBNO / MovementDisable / InvalidTarget / AvoidAttack GEs & tags BEFORE healing
     if UObjectUtils.IsValid(asc) then
         for i = 1, #(st.DownedGEHandles or {}) do
             RemoveGE(asc, st.DownedGEHandles[i])
+        end
+        for i = 1, #(st.DownedAvoidTags or {}) do
+            SetLooseTag(asc, ctrl, st.DownedAvoidTags[i], false)
         end
         SetLooseTag(asc, ctrl, "Status.DBNO", false)
         SetLooseTag(asc, ctrl, "Gameplay.DamageImmunity", false)
     end
     st.DownedGEHandles = {}
+    st.DownedAvoidTags = {}
     st.ReviveProgress = 0.0
     st.OutOfRangeTime = 0.0
 
-    -- 2. Restore AnimationBlueprint from SingleNode & stop any downed montage
-    RestorePawnAnimBlueprint(st, pawn)
+    -- 2. Stop paused downed death montage smoothly before kipping up
     if UObjectUtils.IsValid(st.DownedMontage) then
-        StopPawnMontage(pawn, st.DownedMontage, 0.10)
+        StopPawnMontage(pawn, st.DownedMontage, 0.14)
     end
     st.DownedMontage = nil
+    st.DownedSeqAsset = nil
     st.DownedAnimLocked = false
 
     -- 3. Restore AI perception, inputs & walking state
     SetDownedAIPerception(pawn, false)
+    EnemyAIDirector.OnPlayerRevived(pid, pawn)
     InputRouting.SetPlayerInputLock(ctrl, "LocalCoop.Downed", false)
     pcall(function() if pawn.CharacterMovement then pawn.CharacterMovement:SetMovementMode(1) end end)
 
@@ -1150,6 +978,12 @@ end
 
 function ReviveSystem.Reset()
     AssetsCheckedThisWorld = false
+    CachedMontages = {}
+    LastTickTime = 0.0
+    LastDeaggroAt = 0.0
+    LastAlivePollAt = 0.0
+    Scheduler.CancelByTag("Revive.StandUpDance.0")
+    Scheduler.CancelByTag("Revive.StandUpDance.1")
     ReviveOverlay.Destroy()
     for pid = 0, 1 do
         local st = ReviveSystem.Players[pid]
@@ -1188,11 +1022,29 @@ end
 
 function ReviveSystem.Tick(now)
     now = now or os.clock()
-    local dt = (LastTickTime > 0.0) and math.min(0.20, math.max(0.01, now - LastTickTime)) or 0.05
+    local rawDt = (LastTickTime > 0.0) and math.max(0.0, now - LastTickTime) or 0.05
+    local dt = math.min(0.20, math.max(0.01, rawDt))
     LastTickTime = now
 
     if not SessionManager.IsSafeForGameplayHooks() then return end
-    if InputRouting.IsGamePaused() then return end
+    if InputRouting.IsGamePaused() then
+        -- Keep wall-clock deadlines frozen while the game is paused.
+        if rawDt > 0.0 then
+            for pid = 0, 1 do
+                local st = ReviveSystem.Players[pid]
+                if st then
+                    if st.InvulnUntil and st.InvulnUntil > 0.0 then st.InvulnUntil = st.InvulnUntil + rawDt end
+                    if st.TempHealExpireAt and st.TempHealExpireAt > 0.0 then st.TempHealExpireAt = st.TempHealExpireAt + rawDt end
+                    if st.ReviveDanceStartAt and st.ReviveDanceStartAt > 0.0 then st.ReviveDanceStartAt = st.ReviveDanceStartAt + rawDt end
+                    if st.ReviveDanceEndAt and st.ReviveDanceEndAt > 0.0 then st.ReviveDanceEndAt = st.ReviveDanceEndAt + rawDt end
+                    if (st.State == "Downed" or st.State == "BeingRevived") and st.DownedAt and st.DownedAt > 0.0 then
+                        st.DownedAt = st.DownedAt + rawDt
+                    end
+                end
+            end
+        end
+        return
+    end
 
     local p1, p2 = SessionManager.GetP1(), SessionManager.GetP2()
     local p1Pawn, p2Pawn = SessionManager.GetP1Pawn(), SessionManager.GetP2Pawn()
@@ -1266,6 +1118,7 @@ function ReviveSystem.Tick(now)
                 st.InvulnGEHandle = nil
             end
             SetLooseTag(asc, ctrl, "Gameplay.DamageImmunity", false)
+            EnemyAIDirector.OnPlayerRevived(pid, pawn)
         end
 
         if st.State == "Alive" and doAlivePoll then
@@ -1297,7 +1150,8 @@ function ReviveSystem.Tick(now)
 
     local elapsed = now - (st.DownedAt or 0.0)
     local curHp = ReviveSystem.GetHealth(dPawn)
-    if elapsed >= 0.50 and ((not HasGameplayTag(dAsc, "Status.DBNO")) or curHp > math.max(3.5, (st.DownedHealth or 1.0) + 2.5)) then
+    local dbnoCleared = UObjectUtils.IsValid(dAsc) and (not HasGameplayTag(dAsc, "Status.DBNO"))
+    if elapsed >= 0.50 and (dbnoCleared or curHp > math.max(3.5, (st.DownedHealth or 1.0) + 2.5)) then
         CompleteRevive(downedPid, dPawn, dCtrl)
         return
     end
@@ -1307,13 +1161,25 @@ function ReviveSystem.Tick(now)
     end
     MaintainDownedAnimation(st, dPawn, now)
 
-    if (now - LastDeaggroAt) >= 2.00 then
+    if (now - LastDeaggroAt) >= 0.20 then
         DeaggroEnemiesFromDowned(dPawn, rPawn)
         LastDeaggroAt = now
     end
 
-    local radius = tonumber(revCfg.ReviveRadius) or 210.0
+    local radius = tonumber(revCfg.ReviveRadius) or 260.0
     local d2 = UObjectUtils.GetDistanceSq(dPawn, rPawn)
+    -- Also check distance to downed pawn's pelvis bone (falling death animations shift the lying body back from capsule origin)
+    pcall(function()
+        if UObjectUtils.IsValid(dPawn.Mesh) then
+            local pel = dPawn.Mesh:GetSocketLocation(FName("pelvis"))
+            local rLoc = rPawn:K2_GetActorLocation()
+            if pel and rLoc and (pel.X ~= 0.0 or pel.Y ~= 0.0 or pel.Z ~= 0.0) then
+                local dx, dy, dz = pel.X - rLoc.X, pel.Y - rLoc.Y, pel.Z - rLoc.Z
+                local p2 = dx * dx + dy * dy + dz * dz
+                if p2 < d2 then d2 = p2 end
+            end
+        end
+    end)
     local inRange = (d2 <= radius * radius)
     local distMeters = (d2 < math.huge) and (math.sqrt(d2) / 100.0) or 0.0
     local holding = inRange and IsRescuerHoldingRevive(rPid, rCtrl)
@@ -1325,6 +1191,7 @@ function ReviveSystem.Tick(now)
 
     if inRange then
         st.OutOfRangeTime = 0.0
+        local wasWaiting = (st.State == "Downed")
         if holding then
             st.State = "BeingRevived"
             st.ReviveProgress = math.min(1.0, (st.ReviveProgress or 0.0) + (dt / holdDur))
@@ -1333,6 +1200,10 @@ function ReviveSystem.Tick(now)
             st.ReviveProgress = math.min(1.0, (st.ReviveProgress or 0.0) + (dt / proxDur))
         else
             st.State = "Downed"
+        end
+        if wasWaiting and st.State == "BeingRevived" then
+            Logger.Info("Revive", "Player %d reviving Player %d (dist=%.1fm, hold=%s).",
+                rPid + 1, downedPid + 1, distMeters, tostring(holding))
         end
 
         if st.ReviveProgress >= 1.0 then

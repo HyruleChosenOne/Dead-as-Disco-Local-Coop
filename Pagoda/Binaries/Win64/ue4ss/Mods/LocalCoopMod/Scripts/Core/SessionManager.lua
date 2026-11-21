@@ -1,11 +1,5 @@
--- ============================================================================
--- CO-OP SESSION MANAGER (EXPLICIT FSM, WORLD TRANSITIONS & MULTIPLAYER)
--- ============================================================================
--- Manages Player 1 (index 0) and Player 2 (index 1) identity, world transitions,
--- singleton P2 enforcement (without destroying combat clones/phantoms),
--- PagodaLocalMultiplayerSubsystem integration,
--- WBP_LevelEndScreen_C detection, and spawn / regroup / despawn / auto-leash.
--- ============================================================================
+-- Co-op session lifecycle: P1/P2 controller identity, world transitions,
+-- singleton P2 enforcement, spawn/despawn, regroup, and arena auto-leash.
 
 local UEHelpers = require("UEHelpers")
 local UObjectUtils = require("Utils.UObjectUtils")
@@ -26,9 +20,12 @@ SessionManager.State = {
     ActiveWorldKey = nil,
 }
 
--- Indexed strictly by 0-based Unreal PlayerIndex: [0] = P1, [1] = P2
 local Controllers = { [0] = nil, [1] = nil }
-local ModSpawnedP2Pawns = {} -- [pawnKey] = pawnRef (ONLY pawns created via fallback SpawnActor)
+local ControllersDirty = true
+local LastControllerScanAt = -1.0
+local ModSpawnedP2Pawns = {} -- Fallback SpawnActor pawns only, so combat clones are never touched.
+local CachedLevelEndActive = false
+local CachedLevelEndAt = -1.0
 
 function SessionManager.Init(config, callbacks)
     Config = config or {}
@@ -37,8 +34,8 @@ function SessionManager.Init(config, callbacks)
     SessionManager.State.AutoLeashEnabled = (sessCfg.AutoLeashEnabled ~= false)
 end
 
-function SessionManager.GetPhase()
-    return SessionManager.State.Phase
+function SessionManager.MarkControllersDirty()
+    ControllersDirty = true
 end
 
 function SessionManager.SetCutsceneState(inCutscene)
@@ -46,15 +43,6 @@ function SessionManager.SetCutsceneState(inCutscene)
     if SessionManager.State.IsInCutscene and SessionManager.State.IsSpawned then
         SessionManager.State.Phase = "Cutscene"
     elseif not SessionManager.State.IsInCutscene then
-        SessionManager.State.Phase = SessionManager.State.IsSpawned and "Active" or "Solo"
-    end
-end
-
-function SessionManager.SetTransitioning(isTransitioning)
-    SessionManager.State.IsTransitioning = (isTransitioning == true)
-    if isTransitioning then
-        SessionManager.State.Phase = "Transitioning"
-    else
         SessionManager.State.Phase = SessionManager.State.IsSpawned and "Active" or "Solo"
     end
 end
@@ -147,17 +135,34 @@ function SessionManager.DestroyActorSafely(actor)
     pcall(function() actor:K2_DestroyActor() end)
 end
 
-function SessionManager.RefreshControllers()
+function SessionManager.RefreshControllers(force)
     local inGameplay, currentWorld = UObjectUtils.IsGameplayWorld()
     local worldKey = UObjectUtils.GetKey(currentWorld)
+    local worldChanged = false
 
     if worldKey ~= nil and SessionManager.State.ActiveWorldKey ~= nil and worldKey ~= SessionManager.State.ActiveWorldKey then
-        Logger.Info("SessionManager", "World transition detected -> resetting transient co-op state.")
+        Logger.Info("SessionManager", "World transition detected; resetting transient co-op state.")
+        local wasSpawning = (SessionManager.State.Phase == "Spawning")
         SessionManager.State.ActiveWorldKey = worldKey
+        SessionManager.State.IsTransitioning = false
+        SessionManager.State.IsInCutscene = false
+        if wasSpawning or SessionManager.State.Phase == "Despawning" then
+            SessionManager.State.Phase = "Solo"
+            SessionManager.State.IsSpawned = false
+        end
+        CachedLevelEndActive = false
+        CachedLevelEndAt = -1.0
         ModSpawnedP2Pawns = {}
+        Controllers[0] = nil
+        Controllers[1] = nil
+        ControllersDirty = true
+        worldChanged = true
         UObjectUtils.InvalidateWorldCache()
         Logger.ResetMissingCache()
         Scheduler.BumpGeneration("WorldChanged")
+        if wasSpawning and Callbacks.OnP2ConnectingEnd then
+            UObjectUtils.SafeCall("Session.AbortConnecting", Callbacks.OnP2ConnectingEnd, false)
+        end
         if Callbacks.OnWorldChanged then
             UObjectUtils.SafeCall("Session.OnWorldChanged", Callbacks.OnWorldChanged, currentWorld, inGameplay)
         end
@@ -165,6 +170,18 @@ function SessionManager.RefreshControllers()
         SessionManager.State.ActiveWorldKey = worldKey
     end
 
+    -- Fast path: avoid scanning all PlayerControllers via FindAllOf when cached handles are live
+    local now = os.clock()
+    if (not force) and (not worldChanged) and (not ControllersDirty) then
+        local p1Ok = UObjectUtils.IsLive(Controllers[0])
+        local p2Ok = (not SessionManager.State.IsSpawned) or UObjectUtils.IsLive(Controllers[1])
+        if p1Ok and p2Ok and (now - LastControllerScanAt) < 2.5 then
+            return Controllers[0], Controllers[1]
+        end
+    end
+
+    ControllersDirty = false
+    LastControllerScanAt = now
     Controllers[0] = nil
     Controllers[1] = nil
 
@@ -290,9 +307,6 @@ end
 -- VERIFIED UI / SCENE QUERIES & MOVEMENT INTEGRITY
 -- ============================================================================
 
-local CachedLevelEndActive = false
-local CachedLevelEndAt = -1.0
-
 function SessionManager.IsLevelEndActive()
     local now = os.clock()
     if (now - CachedLevelEndAt) < 0.25 then
@@ -384,7 +398,7 @@ function SessionManager.EnforceSingletonP2()
             end
         end
 
-        SessionManager.RefreshControllers()
+        SessionManager.RefreshControllers(true)
         local p1Pawn, p2Pawn = SessionManager.GetP1Pawn(), SessionManager.GetP2Pawn()
 
         for key, ref in pairs(ModSpawnedP2Pawns) do
@@ -535,7 +549,7 @@ function SessionManager.SpawnOrRegroupP2()
 
                     Scheduler.Delay(180, "Session.OnP2Ready", function()
                         SessionManager.State.Phase = "Active"
-                        SessionManager.RefreshControllers()
+                        SessionManager.RefreshControllers(true)
                         local cP1, cP2 = SessionManager.GetP1(), SessionManager.GetP2()
                         if cP1 and cP2 and Callbacks.OnP2Ready then
                             UObjectUtils.SafeCall("OnP2Ready", Callbacks.OnP2Ready, cP1, cP2)
@@ -583,48 +597,57 @@ function SessionManager.DespawnP2()
         SessionManager.State.Phase = "Despawning"
         Scheduler.BumpGeneration("DespawnP2")
 
-        if Callbacks.BeforeP2Despawn then
-            UObjectUtils.SafeCall("BeforeP2Despawn", Callbacks.BeforeP2Despawn)
-        end
+        local okDespawn, errDespawn = pcall(function()
+            if Callbacks.BeforeP2Despawn then
+                UObjectUtils.SafeCall("BeforeP2Despawn", Callbacks.BeforeP2Despawn)
+            end
 
-        SessionManager.RefreshControllers()
+            SessionManager.RefreshControllers(true)
 
-        local p2Ctrl = SessionManager.GetP2()
-        if not p2Ctrl then
-            SessionManager.State.Phase = "Solo"
+            local p2Ctrl = SessionManager.GetP2()
+            if not p2Ctrl then
+                SessionManager.State.Phase = "Solo"
+                SessionManager.State.IsSpawned = false
+                SessionManager.ClearNativeMultiplayerIfSolo()
+                if Callbacks.Notify then
+                    Callbacks.Notify("Player 2 is not currently active.", "Warning")
+                end
+                return
+            end
+
+            local gs = UObjectUtils.GetGameplayStatics()
+            if gs and UObjectUtils.IsLive(p2Ctrl) then
+                local p2Pawn = nil
+                pcall(function() p2Pawn = p2Ctrl.Pawn end)
+                if UObjectUtils.IsLive(p2Pawn) then
+                    local pKey = UObjectUtils.GetKey(p2Pawn)
+                    if pKey then ModSpawnedP2Pawns[pKey] = nil end
+                    SessionManager.DestroyActorSafely(p2Pawn)
+                end
+                UObjectUtils.MarkDestroyed(p2Ctrl)
+                pcall(function() gs:RemovePlayer(p2Ctrl, true) end)
+                Controllers[1] = nil
+            end
+
             SessionManager.State.IsSpawned = false
+            SessionManager.State.IsInCutscene = false
+            SessionManager.State.Phase = "Solo"
             SessionManager.ClearNativeMultiplayerIfSolo()
+
+            if Callbacks.AfterP2Despawn then
+                UObjectUtils.SafeCall("AfterP2Despawn", Callbacks.AfterP2Despawn, SessionManager.GetP1())
+            end
+
             if Callbacks.Notify then
-                Callbacks.Notify("Player 2 is not currently active.", "Warning")
+                Callbacks.Notify("Player 2 Left", "Warning")
             end
-            return
-        end
+        end)
 
-        local gs = UObjectUtils.GetGameplayStatics()
-        if gs and UObjectUtils.IsLive(p2Ctrl) then
-            local p2Pawn = nil
-            pcall(function() p2Pawn = p2Ctrl.Pawn end)
-            if UObjectUtils.IsLive(p2Pawn) then
-                local pKey = UObjectUtils.GetKey(p2Pawn)
-                if pKey then ModSpawnedP2Pawns[pKey] = nil end
-                SessionManager.DestroyActorSafely(p2Pawn)
-            end
-            UObjectUtils.MarkDestroyed(p2Ctrl)
-            pcall(function() gs:RemovePlayer(p2Ctrl, true) end)
-            Controllers[1] = nil
-        end
-
-        SessionManager.State.IsSpawned = false
-        SessionManager.State.IsInCutscene = false
-        SessionManager.State.Phase = "Solo"
-        SessionManager.ClearNativeMultiplayerIfSolo()
-
-        if Callbacks.AfterP2Despawn then
-            UObjectUtils.SafeCall("AfterP2Despawn", Callbacks.AfterP2Despawn, SessionManager.GetP1())
-        end
-
-        if Callbacks.Notify then
-            Callbacks.Notify("Player 2 Left", "Warning")
+        if not okDespawn then
+            SessionManager.State.IsSpawned = false
+            SessionManager.State.IsInCutscene = false
+            SessionManager.State.Phase = "Solo"
+            Logger.Warn("SessionManager", "DespawnP2 failed: %s", tostring(errDespawn))
         end
     end)
 end
@@ -632,7 +655,7 @@ end
 function SessionManager.TeleportP2ToP1()
     if not UObjectUtils.CanTrigger("TeleportP2", 0.25) then return end
     Scheduler.RunOnGameThread("TeleportP2", function()
-        SessionManager.RefreshControllers()
+        SessionManager.RefreshControllers(true)
         local p1Pawn, p2Pawn = SessionManager.GetP1Pawn(), SessionManager.GetP2Pawn()
         if not p2Pawn then
             if Callbacks.Notify then Callbacks.Notify("Player 2 is not active.", "Warning") end
