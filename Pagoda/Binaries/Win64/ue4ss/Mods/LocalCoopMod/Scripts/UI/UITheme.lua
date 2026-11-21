@@ -14,18 +14,24 @@ UITheme.Fonts = {
 }
 
 UITheme.NativeTextures = {
-    HalftoneBL  = "/Game/Pagoda/UI/Art/SkillTree/bg_halftone_BL.bg_halftone_BL",
-    HalftoneTL  = "/Game/Pagoda/UI/Art/SkillTree/bg_halftone_TL.bg_halftone_TL",
-    Divider     = "/Game/Pagoda/UI/Art/General/popup_divider.popup_divider",
-    Shard       = "/Game/Pagoda/UI/Art/General/shard01.shard01",
-    Checkmark   = "/Game/Pagoda/UI/Art/Cosmetics/checkmark.checkmark",
-    CounterRing = "/Game/Pagoda/UI/Art/HUD/counterRing_inner.counterRing_inner",
-    HeartFull   = "/Game/Pagoda/UI/Art/HUD/Heart_full.Heart_full",
-    TabChar     = "/Game/Pagoda/UI/Art/Cosmetics/icon_jacket.icon_jacket",
-    TabMoves    = "/Game/Pagoda/UI/Art/SkillTree/icon_shred.icon_shred",
-    TabDances   = "/Game/Pagoda/UI/Art/Cosmetics/icon_danceMove.icon_danceMove",
-    TabUpgrades = "/Game/Pagoda/UI/Art/SkillTree/icon_charlie.icon_charlie",
-    TabCoop     = "/Game/Pagoda/UI/Art/SettingMenu/icon_gameplay.icon_gameplay",
+    HalftoneBL     = "/Game/Pagoda/UI/Art/SkillTree/bg_halftone_BL.bg_halftone_BL",
+    HalftoneTL     = "/Game/Pagoda/UI/Art/SkillTree/bg_halftone_TL.bg_halftone_TL",
+    HalftoneCircle = "/Game/Pagoda/UI/Art/TUTORIAL/halftone_gradient_circle_01.halftone_gradient_circle_01",
+    HalftoneRadial = "/Game/Pagoda/UI/Art/Playtest/halftone_gradient_radial.halftone_gradient_radial",
+    Divider        = "/Game/Pagoda/UI/Art/General/popup_divider.popup_divider",
+    Shard          = "/Game/Pagoda/UI/Art/General/shard01.shard01",
+    Checkmark      = "/Game/Pagoda/UI/Art/Cosmetics/checkmark.checkmark",
+    CounterRing    = "/Game/Pagoda/UI/Art/HUD/counterRing_inner.counterRing_inner",
+    CounterRingMMS = "/Game/Pagoda/UI/Art/HUD/counterRing_inner_mms.counterRing_inner_mms",
+    TargeterMain   = "/Game/Pagoda/UI/Art/HUD/targeter_main.targeter_main",
+    TargeterShard  = "/Game/Pagoda/UI/Art/HUD/targeter_shard.targeter_shard",
+    BeatBg         = "/Game/Pagoda/UI/Art/HUD/beatIndicatorA_bg.beatIndicatorA_bg",
+    HeartFull      = "/Game/Pagoda/UI/Art/HUD/Heart_full.Heart_full",
+    TabChar        = "/Game/Pagoda/UI/Art/Cosmetics/icon_jacket.icon_jacket",
+    TabMoves       = "/Game/Pagoda/UI/Art/SkillTree/icon_shred.icon_shred",
+    TabDances      = "/Game/Pagoda/UI/Art/Cosmetics/icon_danceMove.icon_danceMove",
+    TabUpgrades    = "/Game/Pagoda/UI/Art/SkillTree/icon_charlie.icon_charlie",
+    TabCoop        = "/Game/Pagoda/UI/Art/SettingMenu/icon_gameplay.icon_gameplay",
 }
 
 UITheme.Colors = {
@@ -185,12 +191,22 @@ function UITheme.SetOutlineColor(borderWidget, outlineColor, outlineWidth)
     end)
 end
 
+local CachedFonts = {}
+local CachedUMGClasses = nil
+
 function UITheme.StyleText(txtWidget, size, fontPath, color, autoWrap, justify)
     if not UObjectUtils.IsValid(txtWidget) then return end
     pcall(function()
-        local fObj = fontPath and StaticFindObject(fontPath) or nil
+        local fKey = fontPath or UITheme.Fonts.Body
+        local fObj = CachedFonts[fKey]
         if not UObjectUtils.IsValid(fObj) then
-            fObj = StaticFindObject(UITheme.Fonts.Body)
+            fObj = fontPath and StaticFindObject(fontPath) or nil
+            if not UObjectUtils.IsValid(fObj) then
+                fObj = StaticFindObject(UITheme.Fonts.Body)
+            end
+            if UObjectUtils.IsValid(fObj) then
+                CachedFonts[fKey] = fObj
+            end
         end
         if UObjectUtils.IsValid(fObj) then
             txtWidget.Font.FontObject = fObj
@@ -238,6 +254,9 @@ function UITheme.Truncate(str, maxLen)
 end
 
 function UITheme.GetUMGClasses()
+    if CachedUMGClasses and UObjectUtils.IsValid(CachedUMGClasses.WBL) and UObjectUtils.IsValid(CachedUMGClasses.Widget) then
+        return CachedUMGClasses
+    end
     local c = {
         WBL      = UObjectUtils.GetWidgetBlueprintLibrary(),
         Widget   = StaticFindObject("/Script/UMG.UserWidget"),
@@ -256,6 +275,7 @@ function UITheme.GetUMGClasses()
         and UObjectUtils.IsValid(c.Border) and UObjectUtils.IsValid(c.VBox)
         and UObjectUtils.IsValid(c.HBox) and UObjectUtils.IsValid(c.Text)
         and UObjectUtils.IsValid(c.Button) and UObjectUtils.IsValid(c.SizeBox) then
+        CachedUMGClasses = c
         return c
     end
     Logger.Missing("UITheme", "UMG Core Classes", "GetUMGClasses")

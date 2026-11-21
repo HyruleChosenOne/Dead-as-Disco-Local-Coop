@@ -29,10 +29,17 @@ CharacterApplier.CurrentTintPaletteIdx = 1
 local OriginalP2Mesh = nil
 local OriginalP2AnimClass = nil
 local CachedHumanoidSkel = nil
+local CachedSKMClass = nil
+local CachedSMClass = nil
+local CachedMIDClass = nil
+local CachedWCClass = nil
+local CachedProbeClass = nil
 local ApplyingGuardUntil = 0.0
 local LastSwitchAt = 0.0
 local LastAppliedKey = nil
 local LastAppliedPawnKey = nil
+local LastAttachmentsHiddenPawnKey = nil
+local LastAttachmentsHiddenState = nil
 
 -- Verified SKEL_Humanoid boss & enemy meshes from Pagoda-Windows.utoc (crash-checked by GetSkeleton)
 local EXPERIMENTAL_IN_GAME_MODELS = {
@@ -318,11 +325,13 @@ function CharacterApplier.SetModularAttachmentsHidden(p2Pawn, hide)
             end
         end
 
-        for _, clsPath in ipairs({
-            "/Script/Engine.SkeletalMeshComponent",
-            "/Script/Engine.StaticMeshComponent",
-        }) do
-            local compClass = StaticFindObject(clsPath)
+        if not UObjectUtils.IsValid(CachedSKMClass) then
+            pcall(function() CachedSKMClass = StaticFindObject("/Script/Engine.SkeletalMeshComponent") end)
+        end
+        if not UObjectUtils.IsValid(CachedSMClass) then
+            pcall(function() CachedSMClass = StaticFindObject("/Script/Engine.StaticMeshComponent") end)
+        end
+        for _, compClass in ipairs({ CachedSKMClass, CachedSMClass }) do
             if UObjectUtils.IsValid(compClass) then
                 local comps = p2Pawn:K2_GetComponentsByClass(compClass)
                 if comps then
@@ -342,6 +351,8 @@ function CharacterApplier.SetModularAttachmentsHidden(p2Pawn, hide)
                 end
             end
         end
+        LastAttachmentsHiddenPawnKey = UObjectUtils.GetKey(p2Pawn)
+        LastAttachmentsHiddenState = shouldHide
     end)
 end
 
@@ -352,8 +363,10 @@ end
 local function ShouldSkipCompForTint(comp)
     if not UObjectUtils.IsLive(comp) then return true end
     local okW, isWidget = pcall(function()
-        local wcClass = StaticFindObject("/Script/UMG.WidgetComponent")
-        return UObjectUtils.IsValid(wcClass) and comp:IsA(wcClass)
+        if not UObjectUtils.IsValid(CachedWCClass) then
+            CachedWCClass = StaticFindObject("/Script/UMG.WidgetComponent")
+        end
+        return UObjectUtils.IsValid(CachedWCClass) and comp:IsA(CachedWCClass)
     end)
     if okW and isWidget then return true end
 
@@ -385,7 +398,10 @@ function CharacterApplier.ApplyP2VisualStyling(p2Pawn)
 
     pcall(function()
         -- Prevent P2's single-player probe from hijacking P1's station prompts
-        local probeClass = StaticFindObject("/Script/Pagoda.PagodaInteractionProbeComponent_Character")
+        if not UObjectUtils.IsValid(CachedProbeClass) then
+            CachedProbeClass = StaticFindObject("/Script/Pagoda.PagodaInteractionProbeComponent_Character")
+        end
+        local probeClass = CachedProbeClass
         if UObjectUtils.IsValid(probeClass) then
             local probes = p2Pawn:K2_GetComponentsByClass(probeClass)
             if probes then
@@ -396,8 +412,14 @@ function CharacterApplier.ApplyP2VisualStyling(p2Pawn)
             end
         end
 
-        local skmClass = StaticFindObject("/Script/Engine.SkeletalMeshComponent")
-        local midClass = StaticFindObject("/Script/Engine.MaterialInstanceDynamic")
+        if not UObjectUtils.IsValid(CachedSKMClass) then
+            CachedSKMClass = StaticFindObject("/Script/Engine.SkeletalMeshComponent")
+        end
+        if not UObjectUtils.IsValid(CachedMIDClass) then
+            CachedMIDClass = StaticFindObject("/Script/Engine.MaterialInstanceDynamic")
+        end
+        local skmClass = CachedSKMClass
+        local midClass = CachedMIDClass
         if not UObjectUtils.IsValid(skmClass) then return end
         local comps = p2Pawn:K2_GetComponentsByClass(skmClass)
         if not comps then return end
@@ -955,9 +977,24 @@ function CharacterApplier.TickWatchdog()
     if not key or key == "Default" then return end
 
     local p2Pawn = SessionManager.GetP2Pawn()
-    if p2Pawn then
-        CharacterApplier.ReassertMeshOnly(p2Pawn)
+    if not (p2Pawn and UObjectUtils.IsValid(p2Pawn.Mesh)) then return end
+
+    local entry = CharacterApplier.FindEntry(key)
+    local pawnKey = UObjectUtils.GetKey(p2Pawn)
+    if entry and UObjectUtils.IsValid(entry.Mesh)
+        and LastAppliedPawnKey == pawnKey
+        and LastAppliedKey == entry.Key
+        and LastAttachmentsHiddenPawnKey == pawnKey
+        and LastAttachmentsHiddenState == true then
+        local curMesh = CharacterApplier.GetMeshAsset(p2Pawn.Mesh)
+        if UObjectUtils.Same(curMesh, entry.Mesh) then
+            -- Fast path: mesh & attachments already verified on this pawn; only check materials lightly
+            CleanStaleCharlieMaterials(p2Pawn.Mesh, entry.Mesh)
+            return
+        end
     end
+
+    CharacterApplier.ReassertMeshOnly(p2Pawn)
 end
 
 function CharacterApplier.GetCSMSummary()

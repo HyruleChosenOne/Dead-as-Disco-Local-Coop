@@ -217,9 +217,23 @@ ViewportController.Init(Config, {
     CloseP2MenuIfOpen = function() if P2Menu.IsOpen() then P2Menu.Close(true) end end,
     OnScreenModeChanged = function()
         P2Menu.OnScreenModeChanged()
+        VanillaHUD.InvalidateMatchState()
         VanillaHUD.Sync()
     end,
-    SyncHUD = VanillaHUD.Sync,
+    OnP2UnhiddenAfterP1Menu = function(p2Pawn)
+        if not UObjectUtils.IsLive(p2Pawn) then return end
+        local key = ProfileStore.GetP2().CharacterKey
+        if key and key ~= "Default" then
+            CharacterApplier.ReassertMeshOnly(p2Pawn)
+        else
+            CharacterApplier.SetModularAttachmentsHidden(p2Pawn, false)
+            CharacterApplier.ApplyP2VisualStyling(p2Pawn)
+        end
+    end,
+    SyncHUD = function()
+        VanillaHUD.InvalidateMatchState()
+        VanillaHUD.Sync()
+    end,
     SaveProfile = SaveP2Profile,
     Notify = Notify,
 })
@@ -607,11 +621,15 @@ InstallRuntimeHooks = function()
     HookRegistry.RegisterScript("/Game/Pagoda/Characters/Player/Components/BPC_PlayerCosmeticComponent.BPC_PlayerCosmeticComponent_C:OnCosmeticsApplied", OnCosmeticsApplied)
 
     HookRegistry.RegisterScript("/Game/Pagoda/UI/Cosmetics/WBP_Cosmetics_Main.WBP_Cosmetics_Main_C:BP_OnActivated", function()
-        Scheduler.Delay(35, "DiveBar.CosmeticsAspect", ViewportController.SyncP1DiveBarMenuAspect, true)
+        InputRouting.InvalidateMenuCache()
+        VanillaHUD.InvalidateMatchState()
+        Scheduler.Delay(35, "DiveBar.CosmeticsP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
     end)
 
     HookRegistry.RegisterScript("/Game/Pagoda/UI/Cosmetics/WBP_Cosmetics_Main.WBP_Cosmetics_Main_C:BP_OnDeactivated", function()
-        Scheduler.Delay(40, "CosmeticsClose.RestoreAspect", ViewportController.SyncP1DiveBarMenuAspect, true)
+        InputRouting.InvalidateMenuCache()
+        VanillaHUD.InvalidateMatchState()
+        Scheduler.Delay(40, "CosmeticsClose.RestoreP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
         Scheduler.Delay(160, "CosmeticsClose.ReapplyP2", function()
             SessionManager.RefreshControllers()
             local p1, p2, p2Pawn = SessionManager.GetP1(), SessionManager.GetP2(), SessionManager.GetP2Pawn()
@@ -634,7 +652,9 @@ InstallRuntimeHooks = function()
         "/Game/Pagoda/UI/MoveList/WBP_MoveList_Main.WBP_MoveList_Main_C:BP_OnDeactivated",
     }) do
         HookRegistry.RegisterScript(diveMenuHook, function()
-            Scheduler.Delay(35, "DiveBar.MenuAspect", ViewportController.SyncP1DiveBarMenuAspect, true)
+            InputRouting.InvalidateMenuCache()
+            VanillaHUD.InvalidateMatchState()
+            Scheduler.Delay(35, "DiveBar.MenuP2Vis", ViewportController.SyncP1MenuP2Visibility, true)
         end)
     end
 
@@ -681,8 +701,12 @@ InstallRuntimeHooks = function()
 
     -- 6. Deadlock-Free Universal Centralized Pause Menu
     HookRegistry.RegisterScript("/Game/Pagoda/UI/BPFL_UI.BPFL_UI_C:PushToGameUIStack", function()
+        InputRouting.InvalidateMenuCache()
+        VanillaHUD.InvalidateMatchState()
         Scheduler.Delay(25, "UIStack.PauseGuard", function()
-            if inCfg.RoutePauseMenuToPrimaryViewport ~= false then
+            InputRouting.InvalidateMenuCache()
+            VanillaHUD.InvalidateMatchState()
+            if inCfg.RoutePauseMenuToPrimaryViewport ~= false and InputRouting.IsGamePaused() then
                 InputRouting.DeactivateOrphanP2PauseMenus()
             end
             ViewportController.LocalizeAllLayouts()
@@ -955,13 +979,11 @@ Scheduler.Every(50, "FastInteractive", function(now)
     end
 end)
 
--- 500ms loop: Auto-gamepad detection, native P2 HUD verification & Dive Bar menu aspect ratio sync
+-- 500ms loop: Auto-gamepad detection, native P2 HUD verification & P1 menu P2 visibility sync
 Scheduler.Every(500, "HUDSyncAndInput", function(now)
     InputRouting.TickAutoGamepadRouting(now)
+    ViewportController.SyncP1MenuP2Visibility()
     VanillaHUD.Sync()
-    if UObjectUtils.IsInDiveBar(SessionManager.GetP1()) and ViewportController.IsSplitScreenActive() then
-        ViewportController.SyncP1DiveBarMenuAspect()
-    end
 end)
 
 -- 1000ms maintenance: GC cleanup, world transition check, singleton guard, isolation audit, CSM & leash

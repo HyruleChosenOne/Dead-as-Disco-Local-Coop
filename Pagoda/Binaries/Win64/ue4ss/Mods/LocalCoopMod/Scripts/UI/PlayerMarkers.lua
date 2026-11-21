@@ -35,6 +35,8 @@ local Markers = {
 
 local CachedMesh = nil
 local CachedMat = nil
+local CachedSMClass = nil
+local CachedWCClass = nil
 
 function PlayerMarkers.Init(config, callbacks)
     Config = config or {}
@@ -152,7 +154,10 @@ local function SpawnMarkerActor(pid, world, loc, color, sizeUU)
     local m = Markers[pid]
     DestroyMarker(pid)
 
-    local smCls = StaticFindObject("/Script/Engine.StaticMeshActor")
+    if not UObjectUtils.IsValid(CachedSMClass) then
+        pcall(function() CachedSMClass = StaticFindObject("/Script/Engine.StaticMeshActor") end)
+    end
+    local smCls = CachedSMClass
     if not UObjectUtils.IsValid(smCls) then return false end
 
     local actor = world:SpawnActor(smCls, loc, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
@@ -170,7 +175,10 @@ local function SpawnMarkerActor(pid, world, loc, color, sizeUU)
     end
 
     local p1Ctrl = SessionManager.GetP1()
-    local wcCls = StaticFindObject("/Script/UMG.WidgetComponent")
+    if not UObjectUtils.IsValid(CachedWCClass) then
+        pcall(function() CachedWCClass = StaticFindObject("/Script/UMG.WidgetComponent") end)
+    end
+    local wcCls = CachedWCClass
     local drawPx = 256.0
     local scaleFactor = math.max(0.20, sizeUU / drawPx)
 

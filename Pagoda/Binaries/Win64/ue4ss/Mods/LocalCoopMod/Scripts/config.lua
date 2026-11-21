@@ -79,8 +79,8 @@ local Config = {
         ReviveHoldDuration = 0.85,
         ReviveProximityDuration = 1.65,     -- Natural proximity assist while fighting near downed teammate (0 = hold only)
         ReviveRadius = 210.0,               -- Compact, well-fitted combat revive radius in UU
-        ReviveCircleVisualScale = 0.84,     -- Visual floor ring scale factor
-        ReviveCircleOpacity = 0.50,         -- Semi-transparent floor ring opacity
+        ReviveCircleVisualScale = 0.64,     -- Sleek, personal-spotlight floor ring visual scale
+        ReviveCircleOpacity = 0.40,         -- Subtle neon floor spotlight opacity
         ReviveGracePeriod = 2.5,            -- Seconds before progress gently decays after leaving radius
         ReviveDecayRate = 0.12,             -- Gentle decay per second after grace period expires
         ReviveHealthPercent = 0.60,         -- Restored % of MaxHealth on recovery (verified post-heal)

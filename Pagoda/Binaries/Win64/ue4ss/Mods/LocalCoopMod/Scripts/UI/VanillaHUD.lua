@@ -51,6 +51,12 @@ local SharedHost = {
 
 local SplitMountedHUD = nil
 local SharedScaleOverride = nil
+local CachedInActiveMatch = false
+local CachedInActiveMatchAt = -1.0
+
+function VanillaHUD.InvalidateMatchState()
+    CachedInActiveMatchAt = -1.0
+end
 
 function VanillaHUD.Init(config, callbacks)
     Config = config or {}
@@ -128,46 +134,31 @@ function VanillaHUD.Hide()
     end
 end
 
-local function IsP1NativeMatchHUDVisible()
-    local visible = false
-    pcall(function()
-        for _, clsName in ipairs({ "WBP_GameHUD_C", "WBP_InfiniteDiscoHUD_C", "WBP_TowerHUD_C", "WBP_PlayerHealth_Hearts_C" }) do
-            local list = FindAllOf(clsName)
-            if list then
-                for _, w in pairs(list) do
-                    if UObjectUtils.IsLive(w)
-                        and not UObjectUtils.Same(w, SplitMountedHUD)
-                        and not UObjectUtils.Same(w, SharedHost.SubWidgets.Hearts) then
-                        local own = nil
-                        pcall(function() own = w:GetOwningPlayer() end)
-                        local pid = SessionManager.GetPlayerIndex(own)
-                        if (pid == 0 or pid == nil) and InputRouting.IsWidgetVisiblyActive(w) then
-                            visible = true
-                            return
-                        end
-                    end
-                end
-            end
-        end
-    end)
-    return visible
-end
-
-function VanillaHUD.IsInActiveMatch()
+local function ComputeIsInActiveMatch()
     if not SessionManager.IsP2Active() or not SessionManager.IsSafeForGameplayHooks() then return false end
     local p1Ctrl = SessionManager.GetP1()
     if not p1Ctrl then return false end
     if UObjectUtils.IsInDiveBar(p1Ctrl) then return false end
-    if ViewportController.InPauseFullscreen then return false end
+    if ViewportController.InPauseFullscreen or ViewportController.InP1MenuFullscreen then return false end
     if SessionManager.State.IsInCutscene or ViewportController.InCutsceneFullscreen then return false end
+    if not (SessionManager.GetP1Pawn() and SessionManager.GetP2Pawn()) then return false end
     if SessionManager.IsLevelEndActive() then return false end
 
     local hudCfg = Config.HUD or {}
     if hudCfg.HideSharedHUDInMenus ~= false then
         if InputRouting.IsAnyNativeMenuOpen() then return false end
-        if not IsP1NativeMatchHUDVisible() then return false end
     end
     return true
+end
+
+function VanillaHUD.IsInActiveMatch()
+    local now = os.clock()
+    if (now - CachedInActiveMatchAt) < 0.18 then
+        return CachedInActiveMatch
+    end
+    CachedInActiveMatch = ComputeIsInActiveMatch()
+    CachedInActiveMatchAt = now
+    return CachedInActiveMatch
 end
 
 local function ShouldShowSharedP2HUD()
@@ -237,8 +228,23 @@ local function EnsureSplitScreenP2NativeHUD(p1Ctrl, p2Ctrl)
     if hudCfg.EnableNativeP2HUD == false then return end
     if not (p1Ctrl and p2Ctrl and SessionManager.GetP2Pawn()) then return end
     if UObjectUtils.IsInDiveBar(p1Ctrl) or SessionManager.State.IsInCutscene then return end
+    if ViewportController.InPauseFullscreen or ViewportController.InP1MenuFullscreen then return end
 
     local p2Layout, hasNativeHUD = FindP2GameLayoutAndHUD()
+    if UObjectUtils.IsLive(p2Layout) then
+        pcall(function()
+            local v = p2Layout:GetVisibility()
+            if v == 1 or v == 2 then
+                p2Layout:SetVisibility(3) -- SelfHitTestInvisible
+            end
+            if UObjectUtils.IsLive(p2Layout.GameHUDStack) then
+                local sv = p2Layout.GameHUDStack:GetVisibility()
+                if sv == 1 or sv == 2 then
+                    p2Layout.GameHUDStack:SetVisibility(3)
+                end
+            end
+        end)
+    end
     if hasNativeHUD then return end
 
     local gameHudCls = UObjectUtils.LoadClass(NATIVE_WIDGETS.GameHUD.Pkg, NATIVE_WIDGETS.GameHUD.Cls)

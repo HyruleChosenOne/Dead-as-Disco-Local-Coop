@@ -36,6 +36,8 @@ local REVIVE_ASSETS = {
 
 local CachedAssets = {}
 local CachedWLL = nil
+local CachedSMClass = nil
+local CachedWCClass = nil
 
 local RingWorld = {
     WorldKey = nil,
@@ -44,6 +46,7 @@ local RingWorld = {
     OuterWC = nil,
     InnerWC = nil,
     OuterRingImg = nil,
+    OuterPoolImg = nil,
     InnerRingImg = nil,
     OuterMID = nil,
     InnerMID = nil,
@@ -88,9 +91,10 @@ local ActiveState = {
     LastUiUpdateAt = 0.0,
 }
 
-local COLOR_WAITING  = { R = 1.00, G = 0.16, B = 0.30, A = 0.50 }
-local COLOR_PROX     = { R = 0.00, G = 0.93, B = 1.00, A = 0.54 }
-local COLOR_FASTHOLD = { R = 0.14, G = 0.96, B = 0.64, A = 0.60 }
+-- Authentic Dead as Disco Neon Club Palette (Electric Magenta -> Cyber Cyan -> Acid Gold)
+local COLOR_WAITING  = { R = 1.00, G = 0.12, B = 0.56, A = 0.42 }
+local COLOR_PROX     = { R = 0.00, G = 0.93, B = 1.00, A = 0.48 }
+local COLOR_FASTHOLD = { R = 1.00, G = 0.85, B = 0.14, A = 0.56 }
 local SCALAR_PROGRESS_PARAMS = { "Progress", "Percent", "Fill", "Value", "Alpha", "Amount" }
 local MAT_COLOR_PARAMS = { "Color", "Tint", "EmissiveColor", "BaseColor", "PrimaryColor" }
 
@@ -131,22 +135,39 @@ local function ApplyColorToMID(mid, color)
 end
 
 -- ============================================================================
--- 1. 3D WORLD-SPACE FLOOR REVIVE RINGS
+-- 1. 3D WORLD-SPACE DISCO SPOTLIGHT & TARGETER REVIVE RINGS
 -- ============================================================================
 
+local function GetStaticMeshActorClass()
+    if UObjectUtils.IsValid(CachedSMClass) then return CachedSMClass end
+    pcall(function() CachedSMClass = StaticFindObject("/Script/Engine.StaticMeshActor") end)
+    return UObjectUtils.IsValid(CachedSMClass) and CachedSMClass or nil
+end
+
+local function GetWidgetComponentClass()
+    if UObjectUtils.IsValid(CachedWCClass) then return CachedWCClass end
+    pcall(function() CachedWCClass = StaticFindObject("/Script/UMG.WidgetComponent") end)
+    return UObjectUtils.IsValid(CachedWCClass) and CachedWCClass or nil
+end
+
 local function SpawnRingWidgetActor(world, loc, rot, drawPx, initColor, isInner)
-    local smCls = StaticFindObject("/Script/Engine.StaticMeshActor")
-    local wcCls = StaticFindObject("/Script/UMG.WidgetComponent")
+    local smCls = GetStaticMeshActorClass()
+    local wcCls = GetWidgetComponentClass()
     local p1Ctrl = SessionManager.GetP1()
     local cls = UITheme.GetUMGClasses()
-    local ringTex = UITheme.GetNativeTexture("CounterRing")
+    local ringTex = UITheme.GetNativeTexture("TargeterMain")
+        or UITheme.GetNativeTexture("CounterRingMMS")
+        or UITheme.GetNativeTexture("CounterRing")
+    local poolTex = UITheme.GetNativeTexture("HalftoneCircle")
+        or UITheme.GetNativeTexture("HalftoneRadial")
+
     if not (UObjectUtils.IsValid(smCls) and UObjectUtils.IsValid(wcCls) and p1Ctrl
         and cls and UObjectUtils.IsValid(cls.Overlay) and UObjectUtils.IsValid(cls.Image) and UObjectUtils.IsValid(ringTex)) then
-        return nil, nil, nil
+        return nil, nil, nil, nil
     end
 
     local actor = world:SpawnActor(smCls, loc, rot)
-    if not UObjectUtils.IsLive(actor) then return nil, nil, nil end
+    if not UObjectUtils.IsLive(actor) then return nil, nil, nil, nil end
 
     pcall(function() actor:SetActorEnableCollision(false) end)
     pcall(function() actor:SetActorTickEnabled(false) end)
@@ -171,13 +192,26 @@ local function SpawnRingWidgetActor(world, loc, rot, drawPx, initColor, isInner)
         local ov = StaticConstructObject(cls.Overlay, wt)
         box:AddChild(ov)
 
-        local bgHalo = StaticConstructObject(cls.Image, wt)
-        pcall(function()
-            bgHalo:SetBrushFromTexture(ringTex, false)
-            bgHalo:SetColorAndOpacity({ R = 0.03, G = 0.01, B = 0.06, A = 0.20 })
-        end)
-        local bgSlot = ov:AddChildToOverlay(bgHalo)
-        pcall(function() bgSlot:SetHorizontalAlignment(0); bgSlot:SetVerticalAlignment(0) end)
+        -- Subtle comic halftone disco spotlight pool on the outer ring only (zero dark square/muddy halo)
+        local poolImg = nil
+        if (not isInner) and UObjectUtils.IsValid(poolTex) then
+            poolImg = StaticConstructObject(cls.Image, wt)
+            pcall(function()
+                poolImg:SetBrushFromTexture(poolTex, false)
+                poolImg:SetColorAndOpacity({
+                    R = initColor.R,
+                    G = initColor.G,
+                    B = initColor.B,
+                    A = (initColor.A or 0.40) * 0.35,
+                })
+            end)
+            local pSlot = ov:AddChildToOverlay(poolImg)
+            pcall(function()
+                pSlot:SetHorizontalAlignment(0)
+                pSlot:SetVerticalAlignment(0)
+                pSlot:SetPadding({ Left = 28.0, Top = 28.0, Right = 28.0, Bottom = 28.0 })
+            end)
+        end
 
         local img = StaticConstructObject(cls.Image, wt)
         pcall(function()
@@ -185,9 +219,10 @@ local function SpawnRingWidgetActor(world, loc, rot, drawPx, initColor, isInner)
             img:SetColorAndOpacity(initColor)
         end)
         local iSlot = ov:AddChildToOverlay(img)
-        local pad = isInner and 16.0 or 8.0
+        local pad = isInner and 18.0 or 6.0
         pcall(function()
-            iSlot:SetHorizontalAlignment(0); iSlot:SetVerticalAlignment(0)
+            iSlot:SetHorizontalAlignment(0)
+            iSlot:SetVerticalAlignment(0)
             iSlot:SetPadding({ Left = pad, Top = pad, Right = pad, Bottom = pad })
         end)
 
@@ -216,19 +251,19 @@ local function SpawnRingWidgetActor(world, loc, rot, drawPx, initColor, isInner)
         pcall(function() wComp:K2_SetRelativeRotation({ Pitch = 90.0, Yaw = 0.0, Roll = 0.0 }, false, {}, false) end)
         pcall(function() wComp:SetWidget(uw) end)
         pcall(function() wComp:SetVisibility(true, true) end)
-        return { wComp = wComp, img = img }
+        return { wComp = wComp, img = img, poolImg = poolImg }
     end)
 
     if okWidget and built and UObjectUtils.IsValid(built.wComp) and UObjectUtils.IsValid(built.img) then
-        return actor, built.wComp, built.img
+        return actor, built.wComp, built.img, built.poolImg
     end
 
     SessionManager.DestroyActorSafely(actor)
-    return nil, nil, nil
+    return nil, nil, nil, nil
 end
 
 local function SpawnRingMeshActor(world, loc, rot, meshObj, matObj)
-    local smCls = StaticFindObject("/Script/Engine.StaticMeshActor")
+    local smCls = GetStaticMeshActorClass()
     if not UObjectUtils.IsValid(smCls) then return nil, nil end
 
     local actor = world:SpawnActor(smCls, loc, rot)
@@ -278,6 +313,7 @@ function ReviveOverlay.DestroyWorldRings()
     RingWorld.OuterWC = nil
     RingWorld.InnerWC = nil
     RingWorld.OuterRingImg = nil
+    RingWorld.OuterPoolImg = nil
     RingWorld.InnerRingImg = nil
     RingWorld.OuterMID = nil
     RingWorld.InnerMID = nil
@@ -299,11 +335,11 @@ local function EnsureWorldRings(world, loc)
     ReviveOverlay.DestroyWorldRings()
     local rot = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
 
-    -- Primary: Flat World-Space UWidgetComponent rings (100% guaranteed exact Crimson/Cyan/Emerald colors)
-    local outerA, outerWC, outerImg = SpawnRingWidgetActor(world, loc, rot, 512.0, COLOR_WAITING, false)
+    -- Primary: Flat World-Space UWidgetComponent disco targeter + halftone spotlight rings
+    local outerA, outerWC, outerImg, outerPoolImg = SpawnRingWidgetActor(world, loc, rot, 512.0, COLOR_WAITING, false)
     if UObjectUtils.IsLive(outerA) then
         local innerA, innerWC, innerImg = SpawnRingWidgetActor(
-            world, { X = loc.X, Y = loc.Y, Z = loc.Z + 2.0 }, rot, 512.0, { R = 1.00, G = 0.72, B = 0.16, A = 1.00 }, true
+            world, { X = loc.X, Y = loc.Y, Z = loc.Z + 1.5 }, rot, 512.0, { R = 0.00, G = 0.93, B = 1.00, A = 0.65 }, true
         )
         if UObjectUtils.IsLive(innerA) then
             RingWorld.WorldKey = wKey
@@ -312,6 +348,7 @@ local function EnsureWorldRings(world, loc)
             RingWorld.OuterWC = outerWC
             RingWorld.InnerWC = innerWC
             RingWorld.OuterRingImg = outerImg
+            RingWorld.OuterPoolImg = outerPoolImg
             RingWorld.InnerRingImg = innerImg
             RingWorld.IsWidgetMode = true
             RingWorld.LastColorMode = nil
@@ -370,26 +407,27 @@ local function UpdateWorldRings(dt)
     if not EnsureWorldRings(world, floorLoc) then return end
 
     local revCfg = Config.Revive or {}
-    local visScale = tonumber(revCfg.ReviveCircleVisualScale) or 0.84
-    local opacityMul = math.max(0.20, math.min(1.0, tonumber(revCfg.ReviveCircleOpacity) or 0.50))
+    local visScale = tonumber(revCfg.ReviveCircleVisualScale) or 0.64
+    local opacityMul = math.max(0.18, math.min(0.85, tonumber(revCfg.ReviveCircleOpacity) or 0.40))
     local radius = (ActiveState.Radius or 210.0) * visScale
     local stepDt = (type(dt) == "number" and dt > 0.0) and math.min(0.10, dt) or 0.016
-    local outerSpeed = ActiveState.InRange and 26.0 or 14.0
-    local innerSpeed = (ActiveState.InRange and ActiveState.IsHolding) and 140.0 or (ActiveState.InRange and 70.0 or 22.0)
+    local outerSpeed = ActiveState.InRange and 32.0 or 16.0
+    local innerSpeed = (ActiveState.InRange and ActiveState.IsHolding) and 150.0 or (ActiveState.InRange and 78.0 or 26.0)
     RingWorld.OuterYaw = (RingWorld.OuterYaw + outerSpeed * stepDt) % 360.0
     RingWorld.InnerYaw = (RingWorld.InnerYaw - innerSpeed * stepDt) % 360.0
 
-    local pulse = 1.0 + 0.03 * math.sin(os.clock() * 5.0)
+    -- 128 BPM disco beat pulse
+    local beatPulse = 1.0 + 0.035 * math.sin(os.clock() * 6.7)
     local p = math.max(0.0, math.min(1.0, ActiveState.Progress or 0.0))
 
     pcall(function()
         RingWorld.OuterActor:K2_SetActorLocationAndRotation(floorLoc, { Pitch = 0.0, Yaw = RingWorld.OuterYaw, Roll = 0.0 }, false, {}, false)
-        RingWorld.InnerActor:K2_SetActorLocationAndRotation({ X = floorLoc.X, Y = floorLoc.Y, Z = floorLoc.Z + 2.0 }, { Pitch = 0.0, Yaw = RingWorld.InnerYaw, Roll = 0.0 }, false, {}, false)
+        RingWorld.InnerActor:K2_SetActorLocationAndRotation({ X = floorLoc.X, Y = floorLoc.Y, Z = floorLoc.Z + 1.5 }, { Pitch = 0.0, Yaw = RingWorld.InnerYaw, Roll = 0.0 }, false, {}, false)
     end)
 
     if RingWorld.IsWidgetMode then
-        local outerWScale = (radius * 2.0) / 512.0
-        local innerWScale = outerWScale * (0.18 + 0.82 * p) * pulse
+        local outerWScale = ((radius * 2.0) / 512.0) * (1.0 + 0.015 * math.sin(os.clock() * 6.7))
+        local innerWScale = outerWScale * (0.22 + 0.78 * p) * beatPulse
         pcall(function()
             if UObjectUtils.IsValid(RingWorld.OuterWC) then
                 RingWorld.OuterWC:SetWorldScale3D({ X = outerWScale, Y = outerWScale, Z = outerWScale })
@@ -401,7 +439,7 @@ local function UpdateWorldRings(dt)
     else
         local meshR = math.max(10.0, RingWorld.MeshRadius or 50.0)
         local outerScale = radius / meshR
-        local innerScale = outerScale * (0.18 + 0.82 * p) * pulse
+        local innerScale = outerScale * (0.22 + 0.78 * p) * beatPulse
         pcall(function()
             RingWorld.OuterActor:SetActorScale3D({ X = outerScale, Y = outerScale, Z = 1.0 })
             RingWorld.InnerActor:SetActorScale3D({ X = innerScale, Y = innerScale, Z = 1.15 })
@@ -413,11 +451,13 @@ local function UpdateWorldRings(dt)
         RingWorld.LastColorMode = colorMode
         local base = (colorMode == "Hold") and COLOR_FASTHOLD or ((colorMode == "Prox") and COLOR_PROX or COLOR_WAITING)
         local c = { R = base.R, G = base.G, B = base.B, A = opacityMul }
+        local poolCol = { R = base.R, G = base.G, B = base.B, A = opacityMul * 0.34 }
         local ic = (colorMode == "Wait")
-            and { R = 1.00, G = 0.72, B = 0.16, A = math.min(0.85, opacityMul * 1.12) }
-            or  { R = base.R, G = base.G, B = base.B, A = math.min(0.85, opacityMul * 1.12) }
+            and { R = 0.00, G = 0.93, B = 1.00, A = math.min(0.75, opacityMul * 1.15) }
+            or  { R = base.R, G = base.G, B = base.B, A = math.min(0.80, opacityMul * 1.25) }
         if RingWorld.IsWidgetMode then
             if UObjectUtils.IsValid(RingWorld.OuterRingImg) then pcall(function() RingWorld.OuterRingImg:SetColorAndOpacity(c) end) end
+            if UObjectUtils.IsValid(RingWorld.OuterPoolImg) then pcall(function() RingWorld.OuterPoolImg:SetColorAndOpacity(poolCol) end) end
             if UObjectUtils.IsValid(RingWorld.InnerRingImg) then pcall(function() RingWorld.InnerRingImg:SetColorAndOpacity(ic) end) end
         else
             ApplyColorToMID(RingWorld.OuterMID, c)
@@ -498,11 +538,22 @@ local function EnsureHUDBuilt(ownerPC, isSplitScreen)
         pcall(function() cSlot:SetAlignment({ X = 0.5, Y = 0.5 }) end)
         pcall(function() cSlot:SetAutoSize(true) end)
 
-        -- Circular Medallion Overlay (spinning outer counter ring + radial progress + pulsing heart)
+        -- Sleek Single-Unit Skewed Dead as Disco Callout Pill (38x38 radial heart medallion on left + compact disco status on right)
+        local card = StaticConstructObject(cls.Border, wt)
+        UITheme.StyleDiscoFrame(card, { R = 0.042, G = 0.016, B = 0.088, A = 0.90 }, UITheme.Colors.Magenta, 1.8, 3.0)
+        card:SetPadding({ Left = 8, Top = 5, Right = 11, Bottom = 5 })
+        UITheme.ApplyNativeSkew(card, -8.0)
+        local crSlot = containerV:AddChildToVerticalBox(card)
+        pcall(function() crSlot:SetHorizontalAlignment(2) end)
+
+        local mainH = StaticConstructObject(cls.HBox, wt)
+        card:SetContent(mainH)
+
+        -- Left: 38x38 Radial Beat Medallion (targeter_main + M_UI_InputHoldProgress_Circular + Heart_full)
         local medBox = StaticConstructObject(cls.SizeBox, wt)
-        pcall(function() medBox:SetWidthOverride(64.0); medBox:SetHeightOverride(64.0) end)
-        local medSlot = containerV:AddChildToVerticalBox(medBox)
-        pcall(function() medSlot:SetHorizontalAlignment(2); medSlot:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 4 }) end)
+        pcall(function() medBox:SetWidthOverride(38.0); medBox:SetHeightOverride(38.0) end)
+        local medSlot = mainH:AddChildToHorizontalBox(medBox)
+        pcall(function() medSlot:SetVerticalAlignment(2); medSlot:SetPadding({ Left = 0, Top = 0, Right = 8, Bottom = 0 }) end)
 
         local ov = StaticConstructObject(cls.Overlay, wt)
         medBox:AddChild(ov)
@@ -510,16 +561,18 @@ local function EnsureHUDBuilt(ownerPC, isSplitScreen)
         local revCfg = Config.Revive or {}
         local spinRingImg, radialImg, radialMID, heartImg = nil, nil, nil, nil
         if revCfg.ShowProjectedReviveRing ~= false and UObjectUtils.IsValid(cls.Image) then
-            local ringTex = UITheme.GetNativeTexture("CounterRing")
+            local ringTex = UITheme.GetNativeTexture("TargeterMain")
+                or UITheme.GetNativeTexture("CounterRingMMS")
+                or UITheme.GetNativeTexture("CounterRing")
             if UObjectUtils.IsValid(ringTex) then
                 spinRingImg = StaticConstructObject(cls.Image, wt)
                 pcall(function()
                     spinRingImg:SetBrushFromTexture(ringTex, false)
-                    spinRingImg:SetColorAndOpacity(UITheme.Colors.Crimson)
+                    spinRingImg:SetColorAndOpacity(UITheme.Colors.Magenta)
                     spinRingImg:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
                 end)
                 local srSlot = ov:AddChildToOverlay(spinRingImg)
-                pcall(function() srSlot:SetHorizontalAlignment(0); srSlot:SetVerticalAlignment(0) end) -- Fill
+                pcall(function() srSlot:SetHorizontalAlignment(0); srSlot:SetVerticalAlignment(0) end)
             end
 
             local radialMat = LoadCachedAsset("RadialMat") or LoadCachedAsset("RadialMatAlt")
@@ -530,17 +583,17 @@ local function EnsureHUDBuilt(ownerPC, isSplitScreen)
                     radialMID = radialImg:GetDynamicMaterial()
                 end)
                 local rdSlot = ov:AddChildToOverlay(radialImg)
-                pcall(function() rdSlot:SetHorizontalAlignment(0); rdSlot:SetVerticalAlignment(0); rdSlot:SetPadding({ Left = 6, Top = 6, Right = 6, Bottom = 6 }) end)
+                pcall(function() rdSlot:SetHorizontalAlignment(0); rdSlot:SetVerticalAlignment(0); rdSlot:SetPadding({ Left = 3, Top = 3, Right = 3, Bottom = 3 }) end)
             end
 
             local heartTex = UITheme.GetNativeTexture("HeartFull")
             if UObjectUtils.IsValid(heartTex) then
                 local hBox = StaticConstructObject(cls.SizeBox, wt)
-                pcall(function() hBox:SetWidthOverride(24.0); hBox:SetHeightOverride(24.0) end)
+                pcall(function() hBox:SetWidthOverride(16.0); hBox:SetHeightOverride(16.0) end)
                 heartImg = StaticConstructObject(cls.Image, wt)
                 pcall(function()
                     heartImg:SetBrushFromTexture(heartTex, false)
-                    heartImg:SetColorAndOpacity(UITheme.Colors.Crimson)
+                    heartImg:SetColorAndOpacity(UITheme.Colors.Magenta)
                     heartImg:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
                 end)
                 hBox:AddChild(heartImg)
@@ -551,40 +604,34 @@ local function EnsureHUDBuilt(ownerPC, isSplitScreen)
             pcall(function() medBox:SetVisibility(1) end)
         end
 
-        -- Slanted native Dead as Disco callout banner below circular ring
-        local card = StaticConstructObject(cls.Border, wt)
-        UITheme.StyleDiscoFrame(card, UITheme.Colors.PanelBackdrop, UITheme.Colors.Crimson, 2.0, 3.0)
-        card:SetPadding({ Left = 12, Top = 7, Right = 12, Bottom = 7 })
-        UITheme.ApplyNativeSkew(card, -7.0)
-        local crSlot = containerV:AddChildToVerticalBox(card)
-        pcall(function() crSlot:SetHorizontalAlignment(2) end)
-
+        -- Right: Compact 2-line Disco Callout + slim 128x5px neon bar
         local vb = StaticConstructObject(cls.VBox, wt)
-        card:SetContent(vb)
+        local vbSlot = mainH:AddChildToHorizontalBox(vb)
+        pcall(function() vbSlot:SetVerticalAlignment(2) end)
 
         local topH = StaticConstructObject(cls.HBox, wt)
         local tSlot = vb:AddChildToVerticalBox(topH)
-        pcall(function() tSlot:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 3 }) end)
+        pcall(function() tSlot:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 2 }) end)
 
         local titleTxt = StaticConstructObject(cls.Text, wt)
-        UITheme.StyleText(titleTxt, 11, UITheme.Fonts.Primary, UITheme.Colors.Crimson, false)
-        UITheme.SetText(titleTxt, "PLAYER DOWNED")
+        UITheme.StyleText(titleTxt, 10, UITheme.Fonts.Primary, UITheme.Colors.Magenta, false)
+        UITheme.SetText(titleTxt, "P2 DOWN")
         local titS = topH:AddChildToHorizontalBox(titleTxt)
         pcall(function() titS:SetSize({ Value = 1.0, SizeRule = 1 }); titS:SetVerticalAlignment(2) end)
 
         local pctTxt = StaticConstructObject(cls.Text, wt)
-        UITheme.StyleText(pctTxt, 10, UITheme.Fonts.Secondary, UITheme.Colors.Gold, false)
+        UITheme.StyleText(pctTxt, 9, UITheme.Fonts.Secondary, UITheme.Colors.Gold, false)
         UITheme.SetText(pctTxt, "0%")
         local pS = topH:AddChildToHorizontalBox(pctTxt)
-        pcall(function() pS:SetVerticalAlignment(2); pS:SetPadding({ Left = 10, Top = 0, Right = 0, Bottom = 0 }) end)
+        pcall(function() pS:SetVerticalAlignment(2); pS:SetPadding({ Left = 8, Top = 0, Right = 0, Bottom = 0 }) end)
 
         local trackBox = StaticConstructObject(cls.SizeBox, wt)
-        pcall(function() trackBox:SetWidthOverride(196.0); trackBox:SetHeightOverride(8.0) end)
+        pcall(function() trackBox:SetWidthOverride(132.0); trackBox:SetHeightOverride(5.0) end)
         local tbS = vb:AddChildToVerticalBox(trackBox)
-        pcall(function() tbS:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 4 }) end)
+        pcall(function() tbS:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 2 }) end)
 
         local track = StaticConstructObject(cls.Border, wt)
-        UITheme.StyleDiscoFrame(track, UITheme.Colors.TrackDark, UITheme.Colors.HairlineSubtle, 0.9, 2.0)
+        UITheme.StyleDiscoFrame(track, UITheme.Colors.TrackDark, UITheme.Colors.HairlineSubtle, 0.8, 1.5)
         track:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 0 })
         trackBox:AddChild(track)
 
@@ -592,7 +639,7 @@ local function EnsureHUDBuilt(ownerPC, isSplitScreen)
         track:SetContent(barH)
 
         local fill = StaticConstructObject(cls.Border, wt)
-        UITheme.StyleDiscoFrame(fill, UITheme.Colors.Emerald, nil, 0.0, 1.5)
+        UITheme.StyleDiscoFrame(fill, UITheme.Colors.Cyan, nil, 0.0, 1.0)
         fill:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 0 })
         local fillSlot = barH:AddChildToHorizontalBox(fill)
 
@@ -602,8 +649,8 @@ local function EnsureHUDBuilt(ownerPC, isSplitScreen)
         local emptySlot = barH:AddChildToHorizontalBox(empty)
 
         local promptTxt = StaticConstructObject(cls.Text, wt)
-        UITheme.StyleText(promptTxt, 9, UITheme.Fonts.Secondary, UITheme.Colors.TextPrimary, false, 1)
-        UITheme.SetText(promptTxt, "STAND IN RING OR HOLD [X / E]")
+        UITheme.StyleText(promptTxt, 8, UITheme.Fonts.Secondary, UITheme.Colors.TextSecondary, false, 0)
+        UITheme.SetText(promptTxt, "HOLD [X / E] TO REVIVE")
         vb:AddChildToVerticalBox(promptTxt)
 
         ViewportController.RehostingGuard = true
@@ -751,28 +798,28 @@ local function UpdateProjectedHUD(now)
     -- 2. Refresh text/bar at 20Hz to keep Slate FText updates lightweight
     if (now - (ActiveState.LastUiUpdateAt or 0.0)) >= 0.045 then
         ActiveState.LastUiUpdateAt = now
-        local who = (ActiveState.DownedPid == 0) and "PLAYER 1 DOWNED" or "PLAYER 2 DOWNED"
+        local who = (ActiveState.DownedPid == 0) and "P1 DOWN" or "P2 DOWN"
         UITheme.SetText(ProjHUD.TitleText, who)
         UITheme.SetText(ProjHUD.PctText, string.format("%d%%", math.floor(clamped * 100 + 0.5)))
 
         local prompt
         if ActiveState.IsHolding and ActiveState.InRange then
-            UITheme.SetOutlineColor(ProjHUD.Card, UITheme.Colors.Emerald, 2.2)
-            UITheme.SetTextColor(ProjHUD.TitleText, UITheme.Colors.Emerald)
-            UITheme.SetFill(ProjHUD.FillBorder, UITheme.Colors.Emerald)
-            prompt = "FAST REVIVING TEAMMATE!"
-        elseif ActiveState.InRange then
-            UITheme.SetOutlineColor(ProjHUD.Card, UITheme.Colors.Cyan, 2.0)
+            UITheme.SetOutlineColor(ProjHUD.Card, UITheme.Colors.Gold, 2.0)
             UITheme.SetTextColor(ProjHUD.TitleText, UITheme.Colors.Gold)
+            UITheme.SetFill(ProjHUD.FillBorder, UITheme.Colors.Gold)
+            prompt = "FAST REVIVING!"
+        elseif ActiveState.InRange then
+            UITheme.SetOutlineColor(ProjHUD.Card, UITheme.Colors.Cyan, 1.8)
+            UITheme.SetTextColor(ProjHUD.TitleText, UITheme.Colors.Cyan)
             UITheme.SetFill(ProjHUD.FillBorder, UITheme.Colors.Cyan)
             prompt = (ActiveState.DownedPid == 0)
-                and "REVIVING... HOLD [X / A] TO SPEED UP"
-                or  "REVIVING... HOLD [E / F] OR [X / A]"
+                and "HOLD [X / A] FAST REVIVE"
+                or  "HOLD [E / F] OR [X / A]"
         else
-            UITheme.SetOutlineColor(ProjHUD.Card, UITheme.Colors.Crimson, 1.8)
-            UITheme.SetTextColor(ProjHUD.TitleText, UITheme.Colors.Crimson)
-            UITheme.SetFill(ProjHUD.FillBorder, UITheme.Colors.Gold)
-            prompt = string.format("STAND IN RING TO REVIVE (%.1fm)", ActiveState.DistMeters or 0.0)
+            UITheme.SetOutlineColor(ProjHUD.Card, UITheme.Colors.Magenta, 1.6)
+            UITheme.SetTextColor(ProjHUD.TitleText, UITheme.Colors.Magenta)
+            UITheme.SetFill(ProjHUD.FillBorder, UITheme.Colors.Magenta)
+            prompt = string.format("STEP IN SPOTLIGHT (%.1fm)", ActiveState.DistMeters or 0.0)
         end
         UITheme.SetText(ProjHUD.PromptText, prompt)
 

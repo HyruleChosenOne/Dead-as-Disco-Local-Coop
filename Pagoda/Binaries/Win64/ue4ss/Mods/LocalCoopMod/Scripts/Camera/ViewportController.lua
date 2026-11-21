@@ -22,6 +22,7 @@ ViewportController.CurrentScreenMode = 0      -- 0=Horizontal Split, 1=Vertical 
 ViewportController.LastSplitScreenMode = 0
 ViewportController.InCutsceneFullscreen = false
 ViewportController.InPauseFullscreen = false
+ViewportController.InP1MenuFullscreen = false
 ViewportController.SavedPreCutsceneMode = nil
 ViewportController.RehostingGuard = false
 ViewportController.DynamicSharedCameraEnabled = true
@@ -32,6 +33,7 @@ local CutsceneIdleChecks = 0
 local SavedOriginalUIScaleRule = nil
 local LocalizedLayoutKeys = {}
 local HiddenPauseP2Layouts = {}
+local P2PawnHiddenForP1Menu = false
 local ModOwnedWidgets = {} -- [tag] = getterFn
 
 local SharedCamActor = nil
@@ -48,11 +50,14 @@ local P1_DIVEBAR_MENU_CLASSES = {
     "WBP_MoveList_Main_C",
     "WBP_Collectibles_Main_C",
     "WBP_Drumkit_Main_C",
+    "WBP_SongList_Main_C",
+    "WBP_SongList_JukeBox_C",
+    "WBP_InfiniteDiscoMenu_C",
+    "WBP_InfiniteDisco_ModeSelect_C",
+    "WBP_LevelSelect_Projected_Main_C",
 }
-local CachedWLL = nil
-local CachedSBL = nil
-local SavedStackSlotStates = {}
-local SavedGlobalDiveBarMenus = {}
+local CachedUISettings = nil
+local CachedCamActorClass = nil
 
 local EXCLUDED_GLOBAL_PATTERNS = {
     "CutsceneVideo", "LoadingScreen", "Splash", "Transition", "FadeToBlack",
@@ -99,13 +104,13 @@ end
 
 function ViewportController.IsArenaCameraActive()
     if not SessionManager.IsP2Active() then return false end
-    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen then return false end
+    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen or ViewportController.InP1MenuFullscreen then return false end
     return ViewportController.GetEffectiveScreenMode() == 2
 end
 
 function ViewportController.IsSplitScreenActive()
     if not SessionManager.IsP2Active() then return false end
-    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen then return false end
+    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen or ViewportController.InP1MenuFullscreen then return false end
     local eff = ViewportController.GetEffectiveScreenMode()
     return (eff == 0 or eff == 1)
 end
@@ -145,7 +150,10 @@ function ViewportController.SyncUIScaleRule()
     local vpCfg = Config.Viewport or {}
     if vpCfg.UseScaleToFitInSplitScreen == false then return end
     pcall(function()
-        local uiSettings = StaticFindObject("/Script/Engine.Default__UserInterfaceSettings")
+        if not UObjectUtils.IsValid(CachedUISettings) then
+            CachedUISettings = StaticFindObject("/Script/Engine.Default__UserInterfaceSettings")
+        end
+        local uiSettings = CachedUISettings
         if not UObjectUtils.IsValid(uiSettings) then return end
 
         if SavedOriginalUIScaleRule == nil then
@@ -211,132 +219,32 @@ function ViewportController.SuppressP2DiveBarCredits()
     end)
 end
 
-local function GetWidgetLayoutLibrary()
-    if UObjectUtils.IsValid(CachedWLL) then return CachedWLL end
-    pcall(function() CachedWLL = StaticFindObject("/Script/UMG.Default__WidgetLayoutLibrary") end)
-    return UObjectUtils.IsValid(CachedWLL) and CachedWLL or nil
-end
-
-local function GetSlateBlueprintLibrary()
-    if UObjectUtils.IsValid(CachedSBL) then return CachedSBL end
-    pcall(function() CachedSBL = StaticFindObject("/Script/UMG.Default__SlateBlueprintLibrary") end)
-    return UObjectUtils.IsValid(CachedSBL) and CachedSBL or nil
-end
-
-local function GetPlayer1SplitViewportMetrics(p1Ctrl)
-    local wll = GetWidgetLayoutLibrary()
-    local sbl = GetSlateBlueprintLibrary()
-    local fullW, fullH, dpi = 1920.0, 1080.0, 1.0
-
-    if UObjectUtils.IsValid(wll) then
-        pcall(function()
-            local s = wll:GetViewportScale(p1Ctrl)
-            if type(s) == "number" and s > 0.05 then dpi = s end
-        end)
-        pcall(function()
-            local rawSz = wll:GetViewportSize(p1Ctrl)
-            if rawSz and type(rawSz.X) == "number" and type(rawSz.Y) == "number" and rawSz.X > 100.0 and rawSz.Y > 100.0 then
-                fullW = rawSz.X / dpi
-                fullH = rawSz.Y / dpi
-            end
-        end)
-    end
-
-    local effMode = ViewportController.GetEffectiveScreenMode()
-    local vpW, vpH = fullW, fullH
-    if effMode == 0 then
-        vpH = fullH * 0.5
-    elseif effMode == 1 then
-        vpW = fullW * 0.5
-    end
-
-    if UObjectUtils.IsValid(wll) and UObjectUtils.IsValid(sbl) and UObjectUtils.IsLive(p1Ctrl) then
-        pcall(function()
-            local geo = wll:GetPlayerScreenWidgetGeometry(p1Ctrl)
-            if geo then
-                local localSz = sbl:GetLocalSize(geo)
-                if localSz and type(localSz.X) == "number" and type(localSz.Y) == "number"
-                    and localSz.X > 100.0 and localSz.Y > 100.0 then
-                    local matchesSplit = (effMode == 0 and localSz.Y < (fullH * 0.85))
-                        or (effMode == 1 and localSz.X < (fullW * 0.85))
-                    if matchesSplit then
-                        vpW, vpH = localSz.X, localSz.Y
-                    end
-                end
-            end
-        end)
-    end
-
-    local fitScale = math.max(0.35, math.min(1.0, math.min(vpW / math.max(1.0, fullW), vpH / math.max(1.0, fullH))))
-    local virtualW = vpW / fitScale
-    local virtualH = vpH / fitScale
-    local padX = math.max(0.0, (virtualW - vpW) * 0.5)
-    local padY = math.max(0.0, (virtualH - vpH) * 0.5)
-    return vpW, vpH, fullW, fullH, fitScale, padX, padY, effMode
-end
-
-local function IsP1DiveBarMenuName(name)
-    if type(name) ~= "string" or name == "" then return false end
-    return name:find("Cosmetics", 1, true) ~= nil
-        or name:find("SkillTree", 1, true) ~= nil
-        or name:find("MoveList", 1, true) ~= nil
-        or name:find("Collectibles", 1, true) ~= nil
-        or name:find("Drumkit", 1, true) ~= nil
-end
-
-local function RestoreSavedStackSlot(key)
-    local rec = SavedStackSlotStates[key]
-    if not rec then return end
-    SavedStackSlotStates[key] = nil
+local function IsWidgetActivelyOpen(w)
+    if not UObjectUtils.IsLive(w) then return false end
+    local vis = 0
     pcall(function()
-        if UObjectUtils.IsValid(rec.Slot) then
-            if rec.Kind == "Canvas" then
-                if rec.OrigAnchors then rec.Slot:SetAnchors(rec.OrigAnchors) end
-                if rec.OrigOffsets then rec.Slot:SetOffsets(rec.OrigOffsets) end
-            elseif rec.Kind == "Padding" and rec.OrigPadding then
-                rec.Slot:SetPadding(rec.OrigPadding)
-            end
-        end
-        if UObjectUtils.IsLive(rec.Widget) then
-            ApplyRenderScale(rec.Widget, 1.0)
+        local v = w:GetVisibility()
+        if type(v) == "number" then vis = v end
+    end)
+    if vis == 1 or vis == 2 then return false end
+    local hasAct, isAct = false, false
+    pcall(function()
+        if type(w.IsActivated) == "function" then
+            hasAct = true
+            isAct = (w:IsActivated() == true)
         end
     end)
+    if hasAct then return isAct end
+    local inVP = false
+    pcall(function() inVP = (type(w.IsInViewport) == "function" and w:IsInViewport() == true) end)
+    return inVP
 end
 
-local function RestoreAllSavedP1DiveBarMenus()
-    local keys = {}
-    for k in pairs(SavedStackSlotStates) do keys[#keys + 1] = k end
-    for _, k in ipairs(keys) do
-        RestoreSavedStackSlot(k)
-    end
-    for k, rec in pairs(SavedGlobalDiveBarMenus) do
-        if rec and UObjectUtils.IsLive(rec.Widget) then
-            pcall(function()
-                rec.Widget:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
-                ApplyRenderScale(rec.Widget, 1.0)
-            end)
-        end
-        SavedGlobalDiveBarMenus[k] = nil
-    end
-end
+local function IsAnyP1MenuCurrentlyOpen()
+    if not SessionManager.IsP2Active() or not SessionManager.IsSafeForGameplayHooks() then return false end
+    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen then return false end
 
-function ViewportController.SyncP1DiveBarMenuAspect()
-    local p1 = SessionManager.GetP1()
-    local shouldLocalize = (p1 ~= nil)
-        and UObjectUtils.IsInDiveBar(p1)
-        and ViewportController.IsSplitScreenActive()
-        and (not ViewportController.InPauseFullscreen)
-        and (not ViewportController.InCutsceneFullscreen)
-
-    if not shouldLocalize then
-        RestoreAllSavedP1DiveBarMenus()
-        return
-    end
-
-    local activeStacks = {}
-    local activeGlobalWidgets = {}
-    local anyMenuActive = false
-
+    local menuOpen = false
     pcall(function()
         local layouts = FindAllOf("PagodaUILayoutWidget")
         if layouts then
@@ -344,17 +252,16 @@ function ViewportController.SyncP1DiveBarMenuAspect()
                 if UObjectUtils.IsLive(layout) then
                     local own = nil
                     pcall(function() own = layout:GetOwningPlayer() end)
-                    if SessionManager.GetPlayerIndex(own) == 0 and UObjectUtils.IsLive(layout.GameMenuStack) then
-                        local actW = nil
-                        pcall(function() actW = layout.GameMenuStack:GetActiveWidget() end)
-                        if UObjectUtils.IsLive(actW) then
-                            local wName = ""
-                            pcall(function() wName = actW:GetFullName() end)
-                            if IsP1DiveBarMenuName(wName) then
-                                anyMenuActive = true
-                                local sk = UObjectUtils.GetKey(layout.GameMenuStack)
-                                if sk then
-                                    activeStacks[sk] = { Layout = layout, Stack = layout.GameMenuStack, ActiveWidget = actW }
+                    if SessionManager.GetPlayerIndex(own) == 0 then
+                        for _, stackName in ipairs({ "GameMenuStack", "ModalStack" }) do
+                            local st = nil
+                            pcall(function() st = layout[stackName] end)
+                            if UObjectUtils.IsValid(st) then
+                                local actW = nil
+                                pcall(function() actW = st:GetActiveWidget() end)
+                                if IsWidgetActivelyOpen(actW) then
+                                    menuOpen = true
+                                    return
                                 end
                             end
                         end
@@ -367,122 +274,80 @@ function ViewportController.SyncP1DiveBarMenuAspect()
             local list = FindAllOf(clsName)
             if list then
                 for _, w in pairs(list) do
-                    if UObjectUtils.IsLive(w) then
-                        local own = nil
-                        pcall(function() own = w:GetOwningPlayer() end)
-                        local pid = SessionManager.GetPlayerIndex(own)
-                        if pid == 0 or pid == nil then
-                            local act, vis, inVP, visEnum = false, false, false, 0
-                            pcall(function() act = (type(w.IsActivated) == "function" and w:IsActivated() == true) end)
-                            pcall(function() vis = (type(w.IsVisible) == "function" and w:IsVisible() == true) end)
-                            pcall(function() inVP = (type(w.IsInViewport) == "function" and w:IsInViewport() == true) end)
-                            pcall(function()
-                                local v = w:GetVisibility()
-                                if type(v) == "number" then visEnum = v end
-                            end)
-                            if visEnum ~= 1 and visEnum ~= 2 and (act or (vis and inVP)) then
-                                anyMenuActive = true
-                                local parent = nil
-                                pcall(function() parent = w:GetParent() end)
-                                if not UObjectUtils.IsValid(parent) and inVP then
-                                    local wk = UObjectUtils.GetKey(w)
-                                    if wk then activeGlobalWidgets[wk] = w end
-                                end
-                            end
-                        end
+                    if IsWidgetActivelyOpen(w) then
+                        menuOpen = true
+                        return
                     end
                 end
             end
         end
     end)
-
-    for k in pairs(SavedStackSlotStates) do
-        if not activeStacks[k] then
-            RestoreSavedStackSlot(k)
-        end
-    end
-    for k, rec in pairs(SavedGlobalDiveBarMenus) do
-        if not activeGlobalWidgets[k] then
-            if rec and UObjectUtils.IsLive(rec.Widget) then
-                pcall(function()
-                    rec.Widget:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
-                    ApplyRenderScale(rec.Widget, 1.0)
-                end)
-            end
-            SavedGlobalDiveBarMenus[k] = nil
-        end
-    end
-
-    if not anyMenuActive then return end
-
-    local _, _, _, _, fitScale, padX, padY, effMode = GetPlayer1SplitViewportMetrics(p1)
-
-    for sk, entry in pairs(activeStacks) do
-        local layout, stack = entry.Layout, entry.Stack
-        pcall(function()
-            local slot = stack.Slot
-            if UObjectUtils.IsValid(slot) then
-                if not SavedStackSlotStates[sk] then
-                    if type(slot.SetOffsets) == "function" then
-                        local oa, oo = nil, nil
-                        pcall(function()
-                            local a = slot:GetAnchors()
-                            if a and a.Minimum and a.Maximum then
-                                oa = { Minimum = { X = a.Minimum.X, Y = a.Minimum.Y }, Maximum = { X = a.Maximum.X, Y = a.Maximum.Y } }
-                            end
-                            local o = slot:GetOffsets()
-                            if o then
-                                oo = { Left = o.Left, Top = o.Top, Right = o.Right, Bottom = o.Bottom }
-                            end
-                        end)
-                        SavedStackSlotStates[sk] = { Widget = stack, Layout = layout, Slot = slot, Kind = "Canvas", OrigAnchors = oa, OrigOffsets = oo }
-                    elseif type(slot.SetPadding) == "function" then
-                        local op = nil
-                        pcall(function()
-                            local p = slot.Padding
-                            if p then op = { Left = p.Left, Top = p.Top, Right = p.Right, Bottom = p.Bottom } end
-                        end)
-                        SavedStackSlotStates[sk] = { Widget = stack, Layout = layout, Slot = slot, Kind = "Padding", OrigPadding = op }
-                    end
-                end
-
-                if type(slot.SetOffsets) == "function" then
-                    slot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
-                    slot:SetOffsets({ Left = -padX, Top = -padY, Right = -padX, Bottom = -padY })
-                elseif type(slot.SetPadding) == "function" then
-                    slot:SetPadding({ Left = -padX, Top = -padY, Right = -padX, Bottom = -padY })
-                end
-            end
-
-            pcall(function() layout:SetClipping(0) end)
-            pcall(function() stack:SetClipping(0) end)
-            ApplyRenderScale(stack, fitScale)
-        end)
-    end
-
-    for wk, w in pairs(activeGlobalWidgets) do
-        pcall(function()
-            if effMode == 0 then
-                w:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 0.5 } })
-            elseif effMode == 1 then
-                w:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 0.5, Y = 1.0 } })
-            end
-            ApplyRenderScale(w, fitScale)
-            SavedGlobalDiveBarMenus[wk] = { Widget = w, Applied = true }
-        end)
-    end
-
-    -- Ensure Wardrobe / SkillTree 3D preview cameras don't letterbox inside P1's split aspect ratio
-    pcall(function()
-        local vt = p1:GetViewTarget()
-        if UObjectUtils.IsLive(vt) and not UObjectUtils.Same(vt, SessionManager.GetP1Pawn()) then
-            local camComp = vt.CameraComponent
-            if UObjectUtils.IsValid(camComp) and camComp.bConstrainAspectRatio == true then
-                camComp.bConstrainAspectRatio = false
-            end
-        end
-    end)
+    return menuOpen
 end
+
+local function SetP2PawnHiddenForP1Menu(hide)
+    local p2Pawn = SessionManager.GetP2Pawn()
+    if not UObjectUtils.IsLive(p2Pawn) then
+        P2PawnHiddenForP1Menu = false
+        return
+    end
+    local shouldHide = (hide == true)
+    pcall(function() p2Pawn:SetActorHiddenInGame(shouldHide) end)
+    pcall(function()
+        if UObjectUtils.IsValid(p2Pawn.Mesh) then
+            p2Pawn.Mesh:SetHiddenInGame(shouldHide, true)
+            p2Pawn.Mesh:SetVisibility(not shouldHide, true)
+        end
+    end)
+    P2PawnHiddenForP1Menu = shouldHide
+    if (not shouldHide) and Callbacks.OnP2UnhiddenAfterP1Menu then
+        UObjectUtils.SafeCall("Viewport.P2Unhidden", Callbacks.OnP2UnhiddenAfterP1Menu, p2Pawn)
+    end
+end
+
+function ViewportController.SyncP1MenuP2Visibility()
+    if not SessionManager.IsP2Active() then
+        if P2PawnHiddenForP1Menu then SetP2PawnHiddenForP1Menu(false) end
+        ViewportController.InP1MenuFullscreen = false
+        return
+    end
+
+    local p1MenuOpen = IsAnyP1MenuCurrentlyOpen()
+    if p1MenuOpen then
+        SetP2PawnHiddenForP1Menu(true)
+        if not ViewportController.InP1MenuFullscreen then
+            ViewportController.InP1MenuFullscreen = true
+            ViewportController.SuppressP2LayoutsForPause(true)
+            ViewportController.ReleaseSharedMidpointCamera(0.05)
+            pcall(function()
+                local mapsSettings = UObjectUtils.GetGameMapsSettings()
+                local gs = UObjectUtils.GetGameplayStatics()
+                local world = UObjectUtils.GetWorld()
+                if mapsSettings then mapsSettings.bUseSplitscreen = false end
+                if gs and world then pcall(function() gs:SetForceDisableSplitscreen(world, true) end) end
+                ViewportController.SyncUIScaleRule()
+            end)
+            if Callbacks.SyncHUD then UObjectUtils.SafeCall("P1MenuEnter.SyncHUD", Callbacks.SyncHUD) end
+        end
+    else
+        if P2PawnHiddenForP1Menu then
+            SetP2PawnHiddenForP1Menu(false)
+        end
+        if ViewportController.InP1MenuFullscreen then
+            ViewportController.InP1MenuFullscreen = false
+            if not ViewportController.InPauseFullscreen then
+                ViewportController.SuppressP2LayoutsForPause(false)
+                if not ViewportController.InCutsceneFullscreen then
+                    ViewportController.ApplyScreenMode(ViewportController.CurrentScreenMode, true)
+                end
+            end
+            if Callbacks.SyncHUD then UObjectUtils.SafeCall("P1MenuExit.SyncHUD", Callbacks.SyncHUD) end
+        end
+    end
+end
+
+-- Alias for existing hook callers
+ViewportController.SyncP1DiveBarMenuAspect = ViewportController.SyncP1MenuP2Visibility
 
 function ViewportController.RefreshLayoutLocalization(layoutWidget)
     if not UObjectUtils.IsLive(layoutWidget) then return end
@@ -509,10 +374,7 @@ function ViewportController.RefreshLayoutLocalization(layoutWidget)
             ApplyRenderScale(layoutWidget.GameHUDStack, hudScale)
         end
         if UObjectUtils.IsLive(layoutWidget.GameMenuStack) then
-            local sk = UObjectUtils.GetKey(layoutWidget.GameMenuStack)
-            if not (sk and SavedStackSlotStates[sk]) then
-                ApplyRenderScale(layoutWidget.GameMenuStack, menuScale)
-            end
+            ApplyRenderScale(layoutWidget.GameMenuStack, menuScale)
         end
         if UObjectUtils.IsLive(layoutWidget.SystemMenuStack) then
             ApplyRenderScale(layoutWidget.SystemMenuStack, menuScale)
@@ -527,6 +389,9 @@ end
 
 function ViewportController.LocalizeAllLayouts()
     pcall(function()
+        if not ViewportController.InPauseFullscreen and not ViewportController.InP1MenuFullscreen then
+            ViewportController.SuppressP2LayoutsForPause(false)
+        end
         ViewportController.SyncUIScaleRule()
         local layouts = FindAllOf("PagodaUILayoutWidget")
         if layouts then
@@ -537,7 +402,7 @@ function ViewportController.LocalizeAllLayouts()
             end
         end
         ViewportController.SuppressP2DiveBarCredits()
-        ViewportController.SyncP1DiveBarMenuAspect()
+        ViewportController.SyncP1MenuP2Visibility()
         if Callbacks.SyncHUD then
             UObjectUtils.SafeCall("Viewport.SyncHUD", Callbacks.SyncHUD)
         end
@@ -633,7 +498,7 @@ function ViewportController.ApplyScreenMode(mode, silent)
 end
 
 function ViewportController.EnforceDiveBarSplitScreen()
-    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen then return end
+    if ViewportController.InCutsceneFullscreen or ViewportController.InPauseFullscreen or ViewportController.InP1MenuFullscreen then return end
     if not SessionManager.IsP2Active() or not UObjectUtils.IsInDiveBar(SessionManager.GetP1()) then return end
 
     pcall(function()
@@ -806,9 +671,7 @@ end
 
 function ViewportController.ResetOnWorldRestart()
     ViewportController.ClearLocalizedCache()
-    RestoreAllSavedP1DiveBarMenus()
-    SavedStackSlotStates = {}
-    SavedGlobalDiveBarMenus = {}
+    P2PawnHiddenForP1Menu = false
     HiddenPauseP2Layouts = {}
     SharedCamActor = nil
     SharedCamWorldKey = nil
@@ -818,6 +681,7 @@ function ViewportController.ResetOnWorldRestart()
     SharedCamOrbitYaw = nil
     LastSetP1CtrlYaw = nil
     ViewportController.InPauseFullscreen = false
+    ViewportController.InP1MenuFullscreen = false
     if ViewportController.InCutsceneFullscreen and ViewportController.SavedPreCutsceneMode ~= nil then
         ViewportController.CurrentScreenMode = ViewportController.SavedPreCutsceneMode
     end

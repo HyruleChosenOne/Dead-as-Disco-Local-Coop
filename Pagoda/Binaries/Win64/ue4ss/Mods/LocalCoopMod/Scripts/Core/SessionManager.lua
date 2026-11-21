@@ -155,6 +155,7 @@ function SessionManager.RefreshControllers()
         Logger.Info("SessionManager", "World transition detected -> resetting transient co-op state.")
         SessionManager.State.ActiveWorldKey = worldKey
         ModSpawnedP2Pawns = {}
+        UObjectUtils.InvalidateWorldCache()
         Logger.ResetMissingCache()
         Scheduler.BumpGeneration("WorldChanged")
         if Callbacks.OnWorldChanged then
@@ -289,7 +290,14 @@ end
 -- VERIFIED UI / SCENE QUERIES & MOVEMENT INTEGRITY
 -- ============================================================================
 
+local CachedLevelEndActive = false
+local CachedLevelEndAt = -1.0
+
 function SessionManager.IsLevelEndActive()
+    local now = os.clock()
+    if (now - CachedLevelEndAt) < 0.25 then
+        return CachedLevelEndActive
+    end
     local active = false
     pcall(function()
         local widgets = FindAllOf("WBP_LevelEndScreen_C")
@@ -297,8 +305,9 @@ function SessionManager.IsLevelEndActive()
             for _, w in pairs(widgets) do
                 if UObjectUtils.IsLive(w) then
                     local okA, act = pcall(function() return w:IsActivated() end)
-                    local okV, vis = pcall(function() return w:IsVisible() end)
-                    if (okA and act) or (okV and vis) then
+                    local vis = 0
+                    pcall(function() vis = tonumber(w:GetVisibility()) or 0 end)
+                    if okA and act == true and vis ~= 1 and vis ~= 2 then
                         active = true
                         return
                     end
@@ -306,6 +315,8 @@ function SessionManager.IsLevelEndActive()
             end
         end
     end)
+    CachedLevelEndActive = active
+    CachedLevelEndAt = now
     return active
 end
 

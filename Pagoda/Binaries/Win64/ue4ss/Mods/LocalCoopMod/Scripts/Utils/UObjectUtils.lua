@@ -16,6 +16,13 @@ local CachedGameMapsSettings = nil
 local CachedAbilitySystemLib = nil
 local CachedKismetSystemLib = nil
 local CachedWidgetBPLib = nil
+local CachedAssetRegistryHelpers = nil
+local CachedWorld = nil
+local CachedWorldAt = -1.0
+local CachedIsGameplay = false
+local CachedIsDiveBar = false
+local CachedDiveBarAt = -1.0
+local CachedTagStructs = {}
 local DestroyedObjectKeys = {}
 local ActionCooldowns = {}
 local RegisteredCustomProps = {}
@@ -230,7 +237,11 @@ end
 
 function UObjectUtils.MakeTagFromString(str)
     if type(str) ~= "string" or str == "" then return nil end
-    return { TagName = UEHelpers.FindOrAddFName(str) }
+    local cached = CachedTagStructs[str]
+    if cached then return cached end
+    local ts = { TagName = UEHelpers.FindOrAddFName(str) }
+    CachedTagStructs[str] = ts
+    return ts
 end
 
 function UObjectUtils.GetTagString(tagUserdata)
@@ -318,30 +329,64 @@ function UObjectUtils.GetWidgetBlueprintLibrary()
     return CachedWidgetBPLib
 end
 
+function UObjectUtils.InvalidateWorldCache()
+    CachedWorld = nil
+    CachedWorldAt = -1.0
+    CachedIsGameplay = false
+    CachedIsDiveBar = false
+    CachedDiveBarAt = -1.0
+end
+
 function UObjectUtils.GetWorld()
+    local now = os.clock()
+    if (now - CachedWorldAt) < 0.20 and UObjectUtils.IsValid(CachedWorld) then
+        return CachedWorld
+    end
     local w = nil
     pcall(function() w = UEHelpers.GetWorld() end)
-    return UObjectUtils.IsValid(w) and w or nil
+    if UObjectUtils.IsValid(w) then
+        CachedWorld = w
+        CachedWorldAt = now
+        return w
+    end
+    CachedWorld = nil
+    return nil
 end
 
 function UObjectUtils.IsGameplayWorld()
+    local now = os.clock()
+    if (now - CachedWorldAt) < 0.20 and UObjectUtils.IsValid(CachedWorld) then
+        return CachedIsGameplay, CachedWorld
+    end
     local world = UObjectUtils.GetWorld()
-    if not UObjectUtils.IsValid(world) then return false, nil end
+    if not UObjectUtils.IsValid(world) then
+        CachedIsGameplay = false
+        return false, nil
+    end
     local ok, fullName = pcall(function() return world:GetFullName() end)
-    if not ok or type(fullName) ~= "string" then return false, nil end
+    if not ok or type(fullName) ~= "string" then
+        CachedIsGameplay = false
+        return false, nil
+    end
     if fullName:find("Level_MainMenu", 1, true)
         or fullName:find("L_Startup", 1, true)
         or fullName:find("Entry", 1, true)
         or fullName:find("Transition", 1, true) then
+        CachedIsGameplay = false
         return false, world
     end
+    CachedIsGameplay = true
     return true, world
 end
 
 function UObjectUtils.IsInDiveBar(primaryPC)
+    local now = os.clock()
+    if (now - CachedDiveBarAt) < 0.25 and UObjectUtils.IsValid(CachedWorld) then
+        return CachedIsDiveBar
+    end
     local ok, res = pcall(function()
         local w = UObjectUtils.GetWorld()
-        if UObjectUtils.IsLive(w) then
+        if UObjectUtils.IsValid(w) then
             local fn = ""
             pcall(function() fn = w:GetFullName() end)
             if fn:find("DiveBar", 1, true) or fn:find("Hub", 1, true) then return true end
@@ -356,7 +401,9 @@ function UObjectUtils.IsInDiveBar(primaryPC)
         end
         return false
     end)
-    return ok and res == true
+    CachedIsDiveBar = (ok and res == true)
+    CachedDiveBarAt = now
+    return CachedIsDiveBar
 end
 
 function UObjectUtils.GetASC(actor)
