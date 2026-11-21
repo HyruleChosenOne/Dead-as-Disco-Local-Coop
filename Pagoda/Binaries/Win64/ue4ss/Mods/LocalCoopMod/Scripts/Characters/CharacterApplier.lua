@@ -108,8 +108,12 @@ local function GetExpectedHumanoidSkeleton()
     return UObjectUtils.IsValid(CachedHumanoidSkel) and CachedHumanoidSkel or nil
 end
 
-local function IsSkeletonCompatibleWithCharlie(targetMesh)
+local function IsSkeletonCompatibleWithCharlie(targetMesh, entry)
     if not UObjectUtils.IsValid(targetMesh) then return false end
+    -- CSM character mods (.utoc/.pak) bring their own custom humanoid USkeleton (e.g. SK_SnowMiku_Skeleton) + PostProcessAnimBP
+    if entry and (entry.Source == "CSM" or entry.IsPak == true or not entry.IsExperimental) then
+        return true
+    end
     local expected = GetExpectedHumanoidSkeleton()
     if not UObjectUtils.IsValid(expected) then return true end
     local cand = nil
@@ -290,16 +294,15 @@ end
 
 local function ShouldKeepAttachedObjectVisible(obj)
     if not UObjectUtils.IsValid(obj) then return true end
-    if IsWeaponOrDrumstickComponent(obj) then return true end
     local fullLow = ""
     pcall(function() fullLow = obj:GetFullName():lower() end)
-    return fullLow:find("drumstick", 1, true) ~= nil
-        or fullLow:find("weapon", 1, true) ~= nil
-        or fullLow:find("indicator", 1, true) ~= nil
+    -- Only keep non-equipment gameplay/VFX/camera helpers; hide all clothing, accessories, drumsticks & weapons on custom models/CSMs
+    return fullLow:find("indicator", 1, true) ~= nil
         or fullLow:find("niagara", 1, true) ~= nil
         or fullLow:find("vfx", 1, true) ~= nil
         or fullLow:find("camera", 1, true) ~= nil
         or fullLow:find("springarm", 1, true) ~= nil
+        or fullLow:find("widget", 1, true) ~= nil
 end
 
 function CharacterApplier.SetModularAttachmentsHidden(p2Pawn, hide)
@@ -307,6 +310,14 @@ function CharacterApplier.SetModularAttachmentsHidden(p2Pawn, hide)
     local shouldHide = (hide == true)
     pcall(function()
         local rootMesh = p2Pawn.Mesh
+        local function applyHideState(comp)
+            if not UObjectUtils.IsValid(comp) or UObjectUtils.Same(comp, rootMesh) then return end
+            if not ShouldKeepAttachedObjectVisible(comp) then
+                pcall(function() comp:SetHiddenInGame(shouldHide, true) end)
+                pcall(function() comp:SetVisibility(not shouldHide, true) end)
+            end
+        end
+
         for _, clsPath in ipairs({
             "/Script/Engine.SkeletalMeshComponent",
             "/Script/Engine.StaticMeshComponent",
@@ -315,14 +326,19 @@ function CharacterApplier.SetModularAttachmentsHidden(p2Pawn, hide)
             if UObjectUtils.IsValid(compClass) then
                 local comps = p2Pawn:K2_GetComponentsByClass(compClass)
                 if comps then
-                    UObjectUtils.ForEachObj(comps, function(comp)
-                        if UObjectUtils.IsValid(comp) and not UObjectUtils.Same(comp, rootMesh) then
-                            if not ShouldKeepAttachedObjectVisible(comp) then
-                                pcall(function() comp:SetHiddenInGame(shouldHide, false) end)
-                                pcall(function() comp:SetVisibility(not shouldHide, false) end)
-                            end
-                        end
-                    end)
+                    UObjectUtils.ForEachObj(comps, applyHideState)
+                end
+            end
+        end
+
+        if UObjectUtils.IsValid(rootMesh) then
+            local numChild = 0
+            pcall(function() numChild = tonumber(rootMesh:GetNumChildrenComponents()) or 0 end)
+            for i = 0, numChild - 1 do
+                local child = nil
+                pcall(function() child = rootMesh:GetChildComponent(i) end)
+                if UObjectUtils.IsValid(child) then
+                    applyHideState(child)
                 end
             end
         end
@@ -721,7 +737,7 @@ function CharacterApplier.ReassertMeshOnly(p2Pawn)
     end
 
     CharacterApplier.ResolveAssets(entry)
-    if not UObjectUtils.IsValid(entry.Mesh) or not IsSkeletonCompatibleWithCharlie(entry.Mesh) then return end
+    if not UObjectUtils.IsValid(entry.Mesh) or not IsSkeletonCompatibleWithCharlie(entry.Mesh, entry) then return end
 
     local mc = p2Pawn.Mesh
     local curMesh = CharacterApplier.GetMeshAsset(mc)
@@ -742,6 +758,7 @@ function CharacterApplier.ReassertMeshOnly(p2Pawn)
         Logger.Debug("CharacterApplier", "Reasserted CSM mesh '%s' on P2.", tostring(entry.Name))
     else
         CleanStaleCharlieMaterials(mc, entry.Mesh)
+        CharacterApplier.SetModularAttachmentsHidden(p2Pawn, true)
     end
 end
 
@@ -855,7 +872,7 @@ function CharacterApplier.ApplyToP2(p1Ctrl, p2Ctrl, p2Pawn, charKey)
         return false, entry
     end
 
-    if UObjectUtils.IsValid(entry.Mesh) and not IsSkeletonCompatibleWithCharlie(entry.Mesh) then
+    if UObjectUtils.IsValid(entry.Mesh) and not IsSkeletonCompatibleWithCharlie(entry.Mesh, entry) then
         Logger.Warn("CharacterApplier", "Refused incompatible skeleton on '%s' to prevent crash.", tostring(entry.Name))
         return false, nil
     end
@@ -920,8 +937,9 @@ function CharacterApplier.ApplyToP2(p1Ctrl, p2Ctrl, p2Pawn, charKey)
     end
 
     ensureVisualStack()
-    -- Event-driven OnCosmeticsApplied handles async streams; single coalesced safety verify at 300ms
+    Scheduler.ReplaceDelay(120, "CharacterApplier.PostVerifyFast", ensureVisualStack, true)
     Scheduler.ReplaceDelay(300, "CharacterApplier.PostVerify", ensureVisualStack, true)
+    Scheduler.ReplaceDelay(650, "CharacterApplier.PostVerifyLate", ensureVisualStack, true)
 
     if charKey ~= nil and Callbacks.SaveProfile then
         UObjectUtils.SafeCall("CharacterApplier.SaveCSM", Callbacks.SaveProfile)

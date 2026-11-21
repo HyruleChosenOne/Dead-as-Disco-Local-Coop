@@ -594,36 +594,35 @@ function PlayerStateIsolation.UnequipCosmeticsForCSM(p1Ctrl, p2Ctrl, p2Pawn, csm
     return PlayerStateIsolation.WithScopedP2PPD(p1Ctrl, "UnequipCosmeticsForCSM", function(p2PPD)
         CatalogService.Refresh()
         local p2 = ProfileStore.GetP2()
-        local defs, defaultBySlot = {}, {}
-        for slot = 1, 5 do
-            local d = CatalogService.FindCosmetic(slot, "default")
-            if UObjectUtils.IsValid(d) then
-                defaultBySlot[slot] = d
-                defs[#defs + 1] = d
-            end
-        end
+        local defs = {}
         if UObjectUtils.IsValid(csmPPCDDef) then defs[#defs + 1] = csmPPCDDef end
         for sIdx = 0, 3 do
             if UObjectUtils.IsValid(p2.DanceSlots[sIdx]) then defs[#defs + 1] = p2.DanceSlots[sIdx] end
         end
 
         WithTemporaryCosmeticAccess(defs, function()
+            -- Strip ALL 5 modular equipment/accessory slots (Body, Jacket, Glasses, Drumsticks, Hair)
+            -- so CSMs and Boss/Enemy models never wear any of Charlie's equipment or accessories!
             if UObjectUtils.IsValid(DedicatedP2AltPPD) then
-                for slot = 1, 5 do pcall(function() DedicatedP2AltPPD:UnequipCosmetic(slot) end) end
-            end
-            for slot = 1, 5 do
-                if UObjectUtils.IsValid(defaultBySlot[slot]) then
-                    pcall(function() p2PPD:EquipCosmetic(defaultBySlot[slot]) end)
+                for slot = 1, 5 do
+                    pcall(function() DedicatedP2AltPPD:UnequipCosmetic(slot) end)
+                    pcall(function() DedicatedP2AltPPD:ClearCosmetic(slot) end)
                 end
             end
-            if UObjectUtils.IsValid(csmPPCDDef) then
-                pcall(function() p2PPD:EquipCosmetic(csmPPCDDef) end)
+            for slot = 1, 5 do
+                pcall(function() p2PPD:UnequipCosmetic(slot) end)
+                pcall(function() p2PPD:ClearCosmetic(slot) end)
             end
             for sIdx = 0, 3 do
                 local dDef = p2.DanceSlots[sIdx]
                 if UObjectUtils.IsValid(dDef) then
                     local dTag = UObjectUtils.MakeTagStruct(dDef.CosmeticIdTag)
-                    if dTag then pcall(function() p2PPD:EquipDanceMoveToSlot(dTag, sIdx) end) end
+                    if dTag then
+                        pcall(function() p2PPD:EquipDanceMoveToSlot(dTag, sIdx) end)
+                        if UObjectUtils.IsValid(DedicatedP2AltPPD) then
+                            pcall(function() DedicatedP2AltPPD:EquipDanceMoveToSlot(dTag, sIdx) end)
+                        end
+                    end
                 end
             end
 
@@ -633,9 +632,9 @@ function PlayerStateIsolation.UnequipCosmeticsForCSM(p1Ctrl, p2Ctrl, p2Pawn, csm
             if UObjectUtils.IsValid(DedicatedP2AltPPD) then
                 pcall(function() cosComp:SetupForPlaythroughData(DedicatedP2AltPPD) end)
             end
-            pcall(function() cosComp:SetupForPlaythroughData(p2PPD) end)
-
             if UObjectUtils.IsValid(csmPPCDDef) then
+                pcall(function() p2PPD:EquipCosmetic(csmPPCDDef) end)
+                pcall(function() cosComp:SetupForPlaythroughData(p2PPD) end)
                 pcall(function() p2PPD:EquipCosmetic(csmPPCDDef) end)
             end
         end)

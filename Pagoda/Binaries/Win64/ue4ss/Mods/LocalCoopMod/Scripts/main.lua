@@ -489,17 +489,13 @@ P2Menu.Init(Config, {
         local p2Store = ProfileStore.GetP2()
         ProfileStore.SetP2Cosmetic(slotNum, def)
         p2Store.CustomPieceOverride = true
-        if slotNum ~= 4 and p2Store.CharacterKey ~= "Default" then
+        if p2Store.CharacterKey ~= "Default" then
             CharacterApplier.ApplyToP2(p1, p2, p2Pawn, "Default")
             return
         end
-        if p2Store.CharacterKey ~= "Default" then
-            CharacterApplier.ApplyToP2(p1, p2, p2Pawn, p2Store.CharacterKey)
-        else
-            PlayerStateIsolation.ApplyOutfitToP2(p1, p2, p2Pawn)
-            ScheduleP2VisualStyling(280)
-            SaveP2Profile()
-        end
+        PlayerStateIsolation.ApplyOutfitToP2(p1, p2, p2Pawn)
+        ScheduleP2VisualStyling(280)
+        SaveP2Profile()
     end,
 })
 
