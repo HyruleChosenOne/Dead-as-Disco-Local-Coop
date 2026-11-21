@@ -1,1 +1,0 @@
-return LoadExport("??0FName@@QEAA@PEB_WW4EFindName@@@Z")

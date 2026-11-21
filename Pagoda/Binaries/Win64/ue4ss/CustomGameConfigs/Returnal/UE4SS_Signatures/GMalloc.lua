@@ -1,1 +1,0 @@
-return LoadExport("?GMalloc@@3PEAVFMalloc@@EA")

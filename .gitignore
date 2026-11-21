@@ -1,4 +1,8 @@
 *.log
 *.pdb
 *.tmp
-
+*.dmp
+*.zip
+p2_profile.json
+saved_p2_customization.json
+Release_v1.0_Experimental/

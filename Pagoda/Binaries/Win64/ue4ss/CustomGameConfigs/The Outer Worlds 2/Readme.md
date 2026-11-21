@@ -1,3 +1,0 @@
-- Requires cmake-experimental-latest
-- AActor is not working therefore relevant hooks are disabled
-- Changes were made to UObject

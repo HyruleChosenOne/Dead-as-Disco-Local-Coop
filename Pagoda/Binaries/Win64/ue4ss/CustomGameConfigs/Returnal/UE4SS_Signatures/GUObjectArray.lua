@@ -1,1 +1,0 @@
-return LoadExport("?GUObjectArray@@3VFUObjectArray@@A")
